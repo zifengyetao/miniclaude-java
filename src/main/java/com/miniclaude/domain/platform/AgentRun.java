@@ -5,7 +5,12 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
-/** 可持久化、可恢复的 Agent 运行实例。 */
+/**
+ * 可持久化、可恢复的 Agent 运行快照。
+ *
+ * <p>该值对象描述一次运行在某一时刻的状态、预算和并发版本，不执行状态迁移，
+ * 也不负责调度。实例不可变，持久化适配器可据此重建运行状态。
+ */
 public final class AgentRun {
 
     public enum Status {
@@ -80,6 +85,13 @@ public final class AgentRun {
         this.timeoutAt = timeoutAt;
     }
 
+    /**
+     * 创建尚未被调度的新运行。
+     *
+     * <p>Agent、目标和执行模式必须有效，最大步数至少为一，费用上限若存在必须为正。
+     * 每次调用生成新的 UUID 和时间戳，因而不具备幂等性；调用方若需请求去重，应在
+     * 应用层提供幂等键。
+     */
     public static AgentRun pending(
             String agentId,
             ExecutionMode executionMode,

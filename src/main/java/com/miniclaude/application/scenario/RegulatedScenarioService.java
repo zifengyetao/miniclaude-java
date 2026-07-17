@@ -28,6 +28,13 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * 风控调查与交易辅助的受监管仿真编排器。
+ *
+ * <p>所有外部数据来自确定性只读 fake；风控只能形成 REVIEW/ESCALATE 建议，
+ * 交易只能形成未提交 OMS 草稿。独立验证、两名非提案人的四眼审批、租户 kill switch
+ * 和截止时间共同构成纵深防御，任何一层都不能授予真实不利决定或订单提交能力。</p>
+ */
 @Service
 public final class RegulatedScenarioService {
     private static final Pattern PII = Pattern.compile(
@@ -62,8 +69,10 @@ public final class RegulatedScenarioService {
     public AgentRun start(String tenant, String scenario, Map<String, Object> input,
                           String idempotencyKey) {
         Instant deadline = deadline(input);
+        // 在创建运行前检查 kill switch/期限，避免阻断状态下产生新的待审批记录。
         policy.guard(tenant, deadline);
         String previous = policy.findRun(tenant, idempotencyKey);
+        // 幂等重放返回原运行，避免客户端重试生成两套四眼审批。
         if (previous != null) return status(tenant, previous);
         RolePack pack = catalog.get(scenario);
         String proposer = required(input, "proposer");
@@ -84,6 +93,7 @@ public final class RegulatedScenarioService {
                 executeTrading(tenant, run, input, deadline);
             }
         } catch (RuntimeException blocked) {
+            // why：安全异常和执行异常都必须转为阻断制品、失败状态与 DENY 审计。
             block(tenant, run, scenario, blocked);
         }
         return status(tenant, run.getId());
@@ -93,10 +103,12 @@ public final class RegulatedScenarioService {
                                       Map<String, Object> input, Instant deadline) {
         policy.guard(tenant, deadline);
         String requestedAction = text(input, "requestedAction", "REVIEW").toUpperCase(Locale.ROOT);
+        // why：风控场景只能协助调查；拒绝、封禁、冻结等客户不利决定必须由域外流程承担。
         if (!"REVIEW".equals(requestedAction) && !"ESCALATE".equals(requestedAction)) {
             throw new SecurityException("automatic reject/deny/ban/freeze decision is forbidden");
         }
         String subject = required(input, "subjectRef");
+        // 原始叙述先脱敏，之后的步骤状态和案例包都不持久化邮箱或手机号。
         String narrative = PII.matcher(text(input, "narrative", "")).replaceAll("[PII]");
         step(tenant, run, "pii-mask", map("maskedNarrative", narrative, "rawPiiPersisted", false));
         RegulatedScenarioPorts.Score rules = investigation.ruleScore(subject);
@@ -107,6 +119,7 @@ public final class RegulatedScenarioService {
         String recommendation = rules.value.add(model.value)
                 .compareTo(new BigDecimal("1.20")) >= 0 ? "ESCALATE" : "REVIEW";
         RegulatedScenarioPorts.Verification verification = verifier.verify(recommendation, evidence);
+        // why：模型/规则聚合结果不能自证正确，必须由独立验证器检查建议集合和证据来源。
         if (!verification.passed) throw new SecurityException("independent verification failed");
         ScenarioArtifact casePackage = artifacts.save(tenant, run.getId(),
                 "INVESTIGATION_CASE_PACKAGE", "investigation-case-package.json",
@@ -128,6 +141,7 @@ public final class RegulatedScenarioService {
         String instrument = required(input, "instrument").toUpperCase(Locale.ROOT);
         String portfolio = required(input, "portfolioRef");
         BigDecimal quantity = decimal(input, "quantity", null);
+        // 只读 fake 提供行情、研究和持仓；接口层没有 OMS 或订单提交方法。
         RegulatedScenarioPorts.MarketSnapshot market = trading.market(instrument);
         RegulatedScenarioPorts.PositionSnapshot position = trading.position(portfolio, instrument);
         long age = number(input, "marketDataAgeSeconds", 0).longValue();
@@ -146,6 +160,7 @@ public final class RegulatedScenarioService {
                                 "estimatedLoss", quantity.abs().multiply(market.price)
                                         .multiply(stressLossPct.abs())),
                         "simulationOnly", true)));
+        // why：确定性硬限额在四眼审批前执行，人工批准也不能覆盖白名单、敞口或时效限制。
         policy.validatePreTrade(instrument, quantity, position.quantity, market.price,
                 stressLossPct, marketOpen, age);
         step(tenant, run, "pre-trade-risk", map("passed", true,
@@ -162,6 +177,7 @@ public final class RegulatedScenarioService {
         Duration ttl = Duration.between(Instant.now(), deadline);
         String parameters = gson.toJson(map("artifactHash", artifactHash,
                 "fourEyes", true, "requiredApprovals", 2, "simulationOnly", true));
+        // 两条独立审批请求绑定同一制品哈希；后续恢复还会校验审批人去重和职责分离。
         orchestrator.awaitApproval(tenant, run.getId(), "four-eyes-1", actionType,
                 parameters, ttl, key(run.getId(), "four-eyes-1"));
         approvals.request(tenant, run.getId(), "four-eyes-2", actionType, parameters, ttl);
@@ -173,6 +189,7 @@ public final class RegulatedScenarioService {
         AgentRun run = status(tenant, runId);
         Context context = context(tenant, runId);
         policy.guard(tenant, context.deadline);
+        // why：提案人自批破坏职责分离，即使另一名审批人不同也不能接受。
         if (actor.equals(context.proposer)) {
             throw new SecurityException("proposer cannot approve own regulated proposal");
         }
@@ -183,6 +200,7 @@ public final class RegulatedScenarioService {
             boolean duplicate = approvals.findApprovals(tenant, runId).stream()
                     .filter(a -> a.getStatus() == ApprovalRequest.Status.APPROVED)
                     .anyMatch(a -> actor.equals(a.getDecidedBy()));
+            // why：四眼要求两名不同自然人，重复使用同一 actor 不能凑足审批数。
             if (duplicate) throw new SecurityException("two different approvers are required");
         }
         ApprovalRequest decided = approvals.decide(tenant, approvalId, request.getActionParameters(),
@@ -202,6 +220,7 @@ public final class RegulatedScenarioService {
                 .collect(Collectors.toList());
         Set<String> actors = approved.stream().map(ApprovalRequest::getDecidedBy)
                 .collect(Collectors.toCollection(HashSet::new));
+        // 恢复点重新验证完整四眼条件，不能只依赖单次 decide 时的局部检查。
         if (approved.size() != 2 || actors.size() != 2 || actors.contains(context.proposer)) {
             throw new SecurityException("two distinct non-proposer approvals are required");
         }
@@ -211,6 +230,7 @@ public final class RegulatedScenarioService {
             Map<String, Object> packageData = jsonMap(source.getContent());
             String recommendation = String.valueOf(packageData.get("recommendation"));
             if (!"REVIEW".equals(recommendation) && !"ESCALATE".equals(recommendation)) {
+                // why：即使制品已获批，恢复时仍限制建议集合，防止存储内容被篡改后执行。
                 throw new SecurityException("unsafe recommendation blocked");
             }
             artifacts.save(tenant, runId, "VERIFIED_RECOMMENDATION",
@@ -219,6 +239,7 @@ public final class RegulatedScenarioService {
                             "automaticAdverseAction", false, "simulationOnly", true)));
         } else {
             ScenarioArtifact proposal = artifact(tenant, runId, "TRADE_PROPOSAL");
+            // 这里只生成明确不可提交的 OMS 草稿；无凭证、无适配器、无 submit 能力。
             artifacts.save(tenant, runId, "OMS_ORDER_DRAFT", "oms-order-draft.json",
                     gson.toJson(map("proposalHash", proposal.getContentHash(), "approvedBy", actors,
                             "status", "DRAFT", "submitted", false, "placeOrderCalled", false,
@@ -248,6 +269,7 @@ public final class RegulatedScenarioService {
     }
 
     public boolean setKillSwitch(String tenant, boolean active, String actor) {
+        // kill switch 按租户生效并审计操作者，可紧急阻止新运行和等待审批后的恢复。
         boolean value = policy.setKilled(tenant, active);
         audit.append(tenant, "USER", actor, "REGULATED_KILL_SWITCH", "SECURITY_DOMAIN",
                 RegulatedSimulationPolicy.DOMAIN, active ? "DENY" : "ALLOW",

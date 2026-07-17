@@ -1,7 +1,10 @@
 package com.miniclaude.domain.runtime;
 
 /**
- * 策略判定结果；默认由调用方按拒绝处理未知状态。
+ * 策略判定的不可变结果。
+ *
+ * <p>结果明确区分允许、拒绝和需审批；调用方只能把 {@link Outcome#ALLOW} 视为可执行，
+ * 对未知值或处理异常应失败关闭。原因用于审计和解释，不应包含密钥等敏感数据。
  */
 public final class PolicyDecision {
     public enum Outcome { ALLOW, DENY, REQUIRE_APPROVAL }

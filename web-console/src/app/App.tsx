@@ -1,3 +1,7 @@
+/**
+ * 应用路由入口：把功能页面挂载到统一外壳的工作区中。
+ * 路由仅控制客户端展示，不构成任何功能或数据访问权限。
+ */
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AdminPage } from '../features/admin/AdminPage'
 import { ApprovalsPage } from '../features/approvals/ApprovalsPage'

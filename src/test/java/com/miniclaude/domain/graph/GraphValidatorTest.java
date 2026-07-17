@@ -7,6 +7,11 @@ import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 覆盖图校验器对受治理线性图和无界循环等关键安全约束的判断。
+ *
+ * <p>测试使用纯领域对象，不涉及条件解析、持久化或节点执行。
+ */
 class GraphValidatorTest {
 
     private final GraphValidator validator = new GraphValidator();
@@ -28,6 +33,7 @@ class GraphValidatorTest {
                         new GraphSpec.Edge("verify", "finish", "state.verdict == 'pass'")),
                 new GraphSpec.Limits(20, 1, new BigDecimal("5.00")));
 
+        // 同时保留策略、工具和验证节点，证明治理节点不会被静态校验误判为不可执行。
         GraphValidationResult result = validator.validate(spec);
 
         assertThat(result.getErrors()).isEmpty();
@@ -48,6 +54,7 @@ class GraphValidatorTest {
                         new GraphSpec.Edge("execute", "plan", "state.retry")),
                 new GraphSpec.Limits(20, 0, new BigDecimal("5.00")));
 
+        // 一个样例故意叠加环和孤立节点，验证校验器会汇总而非短路首个结构错误。
         GraphValidationResult result = validator.validate(spec);
 
         assertThat(result.getErrors())

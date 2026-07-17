@@ -17,6 +17,13 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 受控进化 HTTP 边界。
+ *
+ * <p>端点按候选状态机拆分为观察、提案、评测、复核、shadow、canary、晋升和回滚；
+ * 控制器不暴露任意状态更新或直接写已发布资产的接口。即使客户端伪造 level/automatic，
+ * 服务层仍会重验 L0-L3 边界、职责分离、owner 批准与 L3 allowlist。</p>
+ */
 @RestController
 @RequestMapping("/api/v1/governance/evolution")
 public class GovernedEvolutionController {
@@ -62,6 +69,7 @@ public class GovernedEvolutionController {
     public Map<String, Object> evaluate(@PathVariable String id,
                                         @RequestHeader("X-Actor-Id") String evaluator,
                                         @RequestBody CandidateEvaluationRequest body) {
+        // hidden holdout 仅传递隔离引用；API 不接受隐藏样本正文，避免候选生成方获知测试答案。
         return evolution.evaluate(id, evaluator, body.trainingSetRef, body.regressionSetRef,
                 body.hiddenHoldoutRef, body.suiteId, body.manifestId, body.metrics, body.safetyPassed);
     }
@@ -98,6 +106,7 @@ public class GovernedEvolutionController {
     public Map<String, Object> rollback(@PathVariable String id,
                                         @RequestHeader("X-Actor-Id") String actor,
                                         @RequestBody RollbackRequest body) {
+        // 回滚撤销晋升版本并保留证据，不删除候选、rollout 或父资产。
         return evolution.rollback(id, actor, body.reason);
     }
 
@@ -105,6 +114,7 @@ public class GovernedEvolutionController {
     public List<Map<String, Object>> antiRotScan(@RequestHeader("X-Tenant-Id") String tenant,
                                                  @RequestHeader("X-Actor-Id") String actor,
                                                  @RequestParam(required = false) String currentModel) {
+        // 扫描只报告风险；没有自动删除、覆盖或合并生产资产的能力。
         return antiRot.scan(tenant, currentModel, actor);
     }
 

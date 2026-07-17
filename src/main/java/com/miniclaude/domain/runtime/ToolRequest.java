@@ -6,7 +6,10 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * 工具执行请求。
+ * 工具执行的不可变请求。
+ *
+ * <p>工具名用于受控路由，参数映射只做顶层防御性复制；调用方和网关仍须校验参数模式、
+ * 敏感值及工作区权限，不能把此对象的成功构造视为已授权。
  */
 public final class ToolRequest {
 

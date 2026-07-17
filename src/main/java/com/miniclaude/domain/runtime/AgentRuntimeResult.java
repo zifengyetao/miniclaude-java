@@ -5,7 +5,10 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 运行时执行结果。
+ * 运行时执行结果的不可变传输对象。
+ *
+ * <p>结果统一文本、令牌统计和模型标识，隔离上层与具体引擎返回结构；令牌映射会被
+ * 防御性复制，缺失文本和统计分别规范化为空字符串、空映射。
  */
 public final class AgentRuntimeResult {
 

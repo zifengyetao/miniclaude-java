@@ -24,6 +24,13 @@ import java.util.Map;
 import java.time.Duration;
 import java.util.UUID;
 
+/**
+ * 持久运行的 REST 控制面。
+ *
+ * <p>控制器只做租户边界、输入提取和命令转发；状态转换、幂等、审批参数绑定以及
+ * 预算/超时判定由领域端口及其事务实现负责。查询和命令始终携带租户，避免仅凭全局 ID
+ * 越权访问运行历史。</p>
+ */
 @RestController
 @RequestMapping("/api/v1/platform/runs")
 public class PlatformRunController {
@@ -60,6 +67,7 @@ public class PlatformRunController {
     public AgentRun create(
             @RequestHeader(value = "X-Tenant-Id", defaultValue = "default") String tenantId,
             @Valid @RequestBody CreateAgentRunRequest request) {
+        // 步骤、成本和超时是持久运行的硬边界，在创建时一次性固化，恢复后仍继续生效。
         return platform.startDurableRun(
                 tenantId,
                 request.getAgentId(),
@@ -101,6 +109,7 @@ public class PlatformRunController {
         String parameters = required(body, "actionParameters");
         long ttl = body.get("ttlSeconds") instanceof Number
                 ? ((Number) body.get("ttlSeconds")).longValue() : 900;
+        // 客户端可提供稳定幂等键以安全重试；缺失时生成键只保证本次请求内部唯一。
         String key = body.get("idempotencyKey") == null ? UUID.randomUUID().toString()
                 : body.get("idempotencyKey").toString();
         return orchestrator.awaitApproval(tenantId, id, stepId, actionType, parameters,
@@ -114,7 +123,9 @@ public class PlatformRunController {
             @RequestBody Map<String, Object> body) {
         ApprovalRequest request = approvals.find(tenantId, approvalId)
                 .orElseThrow(() -> new IllegalArgumentException("approval not found"));
+        // 同时校验租户和路径中的 runId，避免把一个运行的批准提交给另一个运行。
         if (!request.getRunId().equals(runId)) throw new IllegalArgumentException("approval not found");
+        // 客户端必须回传精确动作参数；存储层比较申请时的哈希，参数变化即 fail-closed。
         return approvals.decide(tenantId, approvalId, required(body, "actionParameters"),
                 ApprovalRequest.Status.valueOf(required(body, "decision")),
                 required(body, "actor"), body.get("reason") == null ? "" : body.get("reason").toString());
@@ -153,6 +164,7 @@ public class PlatformRunController {
     }
 
     private static String key(String key) {
+        // 无键请求仍可执行，但只有调用方复用同一非空键时，跨请求重试才具备幂等语义。
         return key == null || key.trim().isEmpty() ? UUID.randomUUID().toString() : key;
     }
 }

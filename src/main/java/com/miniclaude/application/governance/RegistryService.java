@@ -13,6 +13,13 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * 版本化资产注册表。
+ *
+ * <p>“不可变”由追加新版本、唯一坐标和状态迁移共同实现：已发布记录没有内容更新入口；
+ * 修订必须创建带 parentId 的后继草稿。解析仅接受精确版本且只返回 PUBLISHED，
+ * 因而 latest、通配符、已撤销版本和内容 hash 不一致都会失败关闭。</p>
+ */
 @Service
 public class RegistryService {
     private final JdbcTemplate jdbc;
@@ -37,6 +44,7 @@ public class RegistryService {
                                       String parentId, String content, String signature, String actor) {
         requireExactVersion(version);
         require(content, "content");
+        // 父资产必须真实存在；后继关系保留版本谱系，不能用一个悬空引用伪造来源。
         if (parentId != null) getById(parentId);
         String id = UUID.randomUUID().toString();
         Instant now = Instant.now();
@@ -56,6 +64,7 @@ public class RegistryService {
         if (asset.getStatus() != VersionedAsset.Status.DRAFT) {
             throw new IllegalStateException("only a draft asset can be published");
         }
+        // 同时比较调用方期望值、入库摘要与当前内容复算值，防止陈旧审批或存储层篡改被发布。
         if (!asset.getContentHash().equals(expectedHash)
                 || !GovernanceHash.sha256(asset.getContent()).equals(expectedHash)) {
             throw new IllegalArgumentException("asset hash verification failed");
@@ -98,6 +107,7 @@ public class RegistryService {
 
     public VersionedAsset resolve(String tenant, VersionedAsset.Type type, String key,
                                   String version, boolean forRun) {
+        // 运行期也禁止“latest”；否则同一发布清单在不同时间可能解析到不同内容，无法复现与回滚。
         requireExactVersion(version);
         List<VersionedAsset> rows = jdbc.query("SELECT * FROM versioned_asset WHERE tenant_id=? "
                         + "AND asset_type=? AND asset_key=? AND version=? AND status=?",
@@ -123,6 +133,7 @@ public class RegistryService {
 
     private static void requireExactVersion(String version) {
         require(version, "version");
+        // 当前约束明确拦截两类漂移表达式；数据库唯一键再保证同一精确坐标不能被覆盖。
         if ("latest".equalsIgnoreCase(version.trim()) || version.contains("*")) {
             throw new IllegalArgumentException("exact asset version is required; latest/wildcards are forbidden");
         }

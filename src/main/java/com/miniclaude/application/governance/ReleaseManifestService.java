@@ -18,6 +18,13 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 
+/**
+ * 构建并验证可复现发布清单。
+ *
+ * <p>创建时把外部 {@code key@version} 转为 {@code key@version#contentHash} 精确 pin，
+ * 并按资产类型排序后计算清单 hash。发布前重新验证清单和每个资产，任何坐标缺失、资产非
+ * PUBLISHED、内容变化或清单摘要不一致都会阻断发布。</p>
+ */
 @Service
 public class ReleaseManifestService {
     private static final Type MAP_TYPE = new TypeToken<Map<String, String>>() { }.getType();
@@ -39,10 +46,12 @@ public class ReleaseManifestService {
     public AgentReleaseManifest create(String tenant, String agentKey, String version,
                                        Map<String, String> pins, String signature, String actor) {
         if (pins == null || pins.isEmpty()) throw new IllegalArgumentException("asset pins are required");
+        // TreeMap 提供稳定序列化顺序；否则相同 pins 可能因 Map 遍历顺序不同产生不同清单 hash。
         TreeMap<String, String> canonicalPins = new TreeMap<>();
         for (Map.Entry<String, String> pin : pins.entrySet()) {
             VersionedAsset.Type type = VersionedAsset.Type.valueOf(pin.getKey().toUpperCase());
             String[] coordinate = pin.getValue().split("@", -1);
+            // 范围版本、latest 或缺失版本不能形成可复现发布，必须在清单创建阶段拒绝。
             if (coordinate.length != 2) throw new IllegalArgumentException("pin must be key@exactVersion");
             VersionedAsset asset = registry.resolve(tenant, type, coordinate[0], coordinate[1], true);
             canonicalPins.put(type.name(), asset.getKey() + "@" + asset.getVersion() + "#" + asset.getContentHash());
@@ -60,6 +69,7 @@ public class ReleaseManifestService {
 
     @Transactional
     public AgentReleaseManifest release(String id, String expectedHash, String actor) {
+        // expectedHash 是乐观确认令牌：审批者确认的是当前清单，而不是同 ID 下可能变化的内容。
         AgentReleaseManifest manifest = verify(id);
         if (manifest.getStatus() != AgentReleaseManifest.Status.DRAFT
                 || !manifest.getManifestHash().equals(expectedHash)) {
@@ -75,6 +85,7 @@ public class ReleaseManifestService {
 
     public AgentReleaseManifest verify(String id) {
         AgentReleaseManifest manifest = get(id);
+        // 先验证清单整体，再逐项验证 pin；两层校验分别覆盖清单编排篡改与资产正文篡改。
         String json = gson.toJson(new TreeMap<>(manifest.getAssetPins()));
         String expected = GovernanceHash.sha256(manifest.getTenantId() + "|" + manifest.getAgentKey()
                 + "|" + manifest.getVersion() + "|" + json);

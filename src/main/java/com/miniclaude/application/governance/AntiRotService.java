@@ -14,6 +14,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * 已发布资产的 anti-rot（防腐化）扫描器。
+ *
+ * <p>扫描只产生可审阅 finding，不删除、不改写、不自动合并资产。陈旧、冲突、提示膨胀、模型
+ * 不兼容和重复内容只是风险证据；真正修复必须走“后继候选→评测→复核→灰度→晋升”链路。
+ * 这避免启发式规则误判时直接破坏生产基线或审计历史。</p>
+ */
 @Service
 public class AntiRotService {
     private final JdbcTemplate jdbc;
@@ -36,6 +43,7 @@ public class AntiRotService {
         List<VersionedAsset> assets = registry.list(tenant);
         Map<String, List<VersionedAsset>> hashes = new HashMap<>();
         for (VersionedAsset asset : assets) {
+            // 草稿、弃用和撤销版本不代表当前稳定基线，避免为历史版本制造噪声 finding。
             if (asset.getStatus() != VersionedAsset.Status.PUBLISHED) continue;
             hashes.computeIfAbsent(asset.getContentHash(), ignored -> new ArrayList<>()).add(asset);
             if (Duration.between(asset.getCreatedAt(), Instant.now()).toDays() > staleDays) {
@@ -81,6 +89,7 @@ public class AntiRotService {
 
     private void finding(VersionedAsset asset, String type, String severity,
                          String evidence, String recommendation) {
+        // 同一资产同类 OPEN finding 去重；重复扫描应积累证据而不是制造告警风暴。
         Integer open = jdbc.queryForObject("SELECT COUNT(*) FROM anti_rot_finding"
                         + " WHERE asset_id=? AND finding_type=? AND status='OPEN'",
                 Integer.class, asset.getId(), type);

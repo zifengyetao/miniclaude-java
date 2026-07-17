@@ -14,6 +14,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 受监管仿真场景目录。
+ *
+ * <p>Graph 将领域策略、PII 处理、只读证据、独立验证和四眼审批显式排成不可省略的链。
+ * RolePack 同时声明 no-auto-action、simulation-only 和 evolution-max-l1：风控只输出
+ * REVIEW/ESCALATE 建议，交易只生成 OMS 草稿，且演进上限 L1 不得改变这些安全边界。</p>
+ */
 @Service
 public final class RegulatedScenarioCatalog {
     public static final String INVESTIGATION = "risk-investigation";
@@ -42,6 +49,7 @@ public final class RegulatedScenarioCatalog {
             nodes.add(new GraphSpec.Node(definitions[i][0],
                     GraphSpec.NodeType.valueOf(definitions[i][1]),
                     "regulated-simulation." + id + "." + definitions[i][0] + "@1.0.0"));
+            // “verified”边表示只有上一步完成验证后才能进入下一节点，防止直接抵达终点制品。
             if (i > 0) edges.add(new GraphSpec.Edge(
                     definitions[i - 1][0], definitions[i][0], "verified"));
         }
@@ -50,6 +58,7 @@ public final class RegulatedScenarioCatalog {
                 new GraphSpec.Limits(16, 1, new BigDecimal("1.00")));
         GraphValidationResult validation = new GraphValidator().validate(graph);
         if (!validation.isValid()) {
+            // why：监管图缺边或节点无效时必须拒绝启动，不能退化成较少控制的流程。
             throw new IllegalStateException("invalid regulated graph: " + validation.getErrors());
         }
         RolePack pack = new RolePack(id, name, "1.0.0",

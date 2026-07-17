@@ -3,7 +3,10 @@ package com.miniclaude.domain.runtime;
 import java.util.Objects;
 
 /**
- * 策略判定请求。
+ * 策略判定的不可变输入。
+ *
+ * <p>动作与资源采用稳定文本标识，执行上下文提供租户和运行边界；本对象不执行
+ * 规范化之外的资源解析，也不携带策略实现细节。
  */
 public final class PolicyRequest {
 

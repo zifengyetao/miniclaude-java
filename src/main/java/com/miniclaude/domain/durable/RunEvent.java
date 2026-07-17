@@ -3,7 +3,13 @@ package com.miniclaude.domain.durable;
 import java.time.Instant;
 import java.util.Objects;
 
-/** 不可变、仅追加的运行事实。 */
+/**
+ * 不可变、仅追加的运行事实。
+ *
+ * <p>{@code sequence} 给出单个运行内的确定顺序，供审计和恢复重放；{@code idempotencyKey}
+ * 约束同一业务操作只产生一个事实。重用幂等键但改变事件类型或载荷应被实现拒绝，
+ * 而不是静默接受不一致历史。{@code payloadHash} 为该检查保存稳定摘要。</p>
+ */
 public final class RunEvent {
     private final String id;
     private final String tenantId;

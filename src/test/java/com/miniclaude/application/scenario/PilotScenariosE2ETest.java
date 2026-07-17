@@ -27,6 +27,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "platform.orchestrator=local"
 })
 @AutoConfigureMockMvc
+/**
+ * 试点场景端到端安全契约测试。
+ *
+ * <p>测试使用 H2 和受控 fake，验证的是编排、隔离和阻断语义，不会访问真实 Git、
+ * 数据库、CRM 或网络。关键断言同时证明终点只产生草稿/制品，而非外部副作用。</p>
+ */
 class PilotScenariosE2ETest {
     private static final Path WORKSPACE = createWorkspace();
 
@@ -66,6 +72,7 @@ class PilotScenariosE2ETest {
 
     @Test
     void codingAgentBlocksMainAndBypassFlags() throws Exception {
+        // why：主分支直写和 --no-verify 都会绕开 Coding 场景的隔离审查链，必须失败。
         JsonNode main = start("coding-agent", "{\"workspace\":\"" + escape(WORKSPACE.toString())
                 + "\",\"goal\":\"change\",\"branch\":\"main\"}");
         JsonNode bypass = start("coding-agent", "{\"workspace\":\"" + escape(WORKSPACE.toString())
@@ -85,6 +92,7 @@ class PilotScenariosE2ETest {
                 .andExpect(jsonPath("$[?(@.type == 'REPORT')].content").value(
                         org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString("\"externalDbConnected\":false"))));
 
+        // 多语句中夹带 DELETE，用于证明只读 guard 不会只检查首个 SELECT。
         JsonNode blocked = start("data-analyst",
                 "{\"metric\":\"x\",\"sql\":\"SELECT * FROM users; DELETE FROM users LIMIT 10\"}");
         assertThat(blocked.get("status").asText()).isEqualTo("FAILED");
@@ -92,6 +100,7 @@ class PilotScenariosE2ETest {
 
     @Test
     void expensiveAnalyticsStopsAtApprovalThenContinues() throws Exception {
+        // fake 成本估算稳定触发人工审批；获批前查询节点不会执行。
         JsonNode waiting = start("data-analyst",
                 "{\"metric\":\"costly\",\"sql\":\"SELECT * FROM expensive_table LIMIT 10\"}");
         assertThat(waiting.get("status").asText()).isEqualTo("WAITING_APPROVAL");
@@ -106,6 +115,7 @@ class PilotScenariosE2ETest {
 
     @Test
     void supportMasksPiiNeverSendsAndHandsSensitiveIntentToHuman() throws Exception {
+        // 正常路径也只能形成未发送草稿，且原始邮箱不能进入持久化制品。
         JsonNode normal = start("customer-support",
                 "{\"message\":\"请联系 test@example.com 查询订单\",\"confidence\":0.95}");
         assertThat(normal.get("status").asText()).isEqualTo("SUCCEEDED");
@@ -114,6 +124,7 @@ class PilotScenariosE2ETest {
         assertThat(artifactsJson).contains("[PII]").contains("\\\"sent\\\":false")
                 .contains("\\\"externalCrmConnected\\\":false").doesNotContain("test@example.com");
 
+        // 敏感投诉即使置信度很高也必须转人工，不能由高分覆盖合规规则。
         JsonNode sensitive = start("customer-support",
                 "{\"message\":\"我要投诉并起诉\",\"confidence\":0.99}");
         assertThat(sensitive.get("status").asText()).isEqualTo("WAITING_APPROVAL");

@@ -1,3 +1,7 @@
+/**
+ * Coding Agent 页面负责选择场景模板、启动/继续运行，并显式刷新运行状态和产物。
+ * 页面使用普通 API 而非 SSE，终端输出与产物列表都是查询时快照，不保证实时连续性。
+ */
 import { FileCode2, Folder, Play, RefreshCw, TerminalSquare } from 'lucide-react'
 import { useState } from 'react'
 import { scenarioApi } from '../../shared/api/client'
@@ -13,6 +17,7 @@ export function CodingPage() {
   const [artifacts, setArtifacts] = useState<ScenarioArtifact[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  /** 使用当前模板和目标启动场景；仓库标识及输入仍须由服务端校验和授权。 */
   async function start() {
     const id = scenario || templates.data?.[0]?.id
     if (!id) return
@@ -21,6 +26,7 @@ export function CodingPage() {
     catch (cause) { setError(cause instanceof Error ? cause.message : '启动失败') }
     finally { setBusy(false) }
   }
+  /** 并行拉取最新运行状态与产物，更新右侧证据快照。 */
   async function refresh() {
     if (!run || !scenario) return
     setBusy(true)
@@ -28,6 +34,7 @@ export function CodingPage() {
     catch (cause) { setError(cause instanceof Error ? cause.message : '刷新失败') }
     finally { setBusy(false) }
   }
+  /** 请求服务端继续已暂停的场景；前端状态不决定该运行是否允许继续。 */
   async function continueRun() {
     if (!run || !scenario) return
     setBusy(true)

@@ -16,6 +16,13 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 受控进化安全边界的集成测试。
+ *
+ * <p>覆盖候选不能自改生产、L2 owner 责任、L3 自动晋升白名单、hidden holdout 隔离、
+ * rollback 保留稳定父版本，以及 anti-rot 只报告不删除。测试刻意验证越权路径失败，
+ * 防止未来新增“便捷入口”时绕过候选状态机。</p>
+ */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:evolution-test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
         "spring.datasource.driver-class-name=org.h2.Driver",
@@ -39,6 +46,7 @@ class GovernedEvolutionTest {
 
         Map<String, Object> candidate = propose(f, "L1", "LOW", null, false, "proposer");
 
+        // 提案只新增候选记录；Evolver 无 Registry 写能力，稳定资产数量和内容均保持不变。
         assertThat(registry.list(f.tenant)).hasSize(before);
         assertThat(registry.getById(f.asset.getId()).getContent()).isEqualTo("base");
         assertThat(text(candidate, "STATUS")).isEqualTo("PROPOSED");
@@ -52,6 +60,7 @@ class GovernedEvolutionTest {
         Map<String, Object> candidate = evaluated(f, "L2", "LOW", "owner-a", false);
         String id = text(candidate, "ID");
 
+        // 普通 reviewer 和错误 owner 均不能代替候选绑定的责任人批准 L2。
         assertThatThrownBy(() -> evolution.review(id, "reviewer", "REVIEWER", "APPROVE", "ok"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("owner");
@@ -69,6 +78,7 @@ class GovernedEvolutionTest {
         String allowedId = text(allowedCandidate, "ID");
         evolution.shadow(allowedId, "automation", Collections.emptyMap());
         evolution.canary(allowedId, 5, "automation", Collections.emptyMap());
+        // 只有 allowlist 内的低风险 CONTENT 类 PROMPT 才走完整 L3 自动路径。
         assertThat(text(evolution.promote(allowedId, true, "automation"), "STATUS"))
                 .isEqualTo("PROMOTED");
 
@@ -78,6 +88,7 @@ class GovernedEvolutionTest {
         evolution.review(forbiddenId, "reviewer", "REVIEWER", "APPROVE", "manual only");
         evolution.shadow(forbiddenId, "reviewer", Collections.emptyMap());
         evolution.canary(forbiddenId, 5, "reviewer", Collections.emptyMap());
+        // RULE 即便低风险且已人工复核，也不因此获得自动晋升权限。
         assertThatThrownBy(() -> evolution.promote(forbiddenId, true, "automation"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("automatic promotion boundary");
@@ -97,6 +108,7 @@ class GovernedEvolutionTest {
         evolution.review(permissionId, "reviewer", "REVIEWER", "APPROVE", "manual only");
         evolution.shadow(permissionId, "reviewer", Collections.emptyMap());
         evolution.canary(permissionId, 5, "reviewer", Collections.emptyMap());
+        // PERMISSION 变更被 changeClass 边界拦截，不能伪装成 allowlist 内的提示内容更新。
         assertThatThrownBy(() -> evolution.promote(permissionId, true, "automation"))
                 .isInstanceOf(IllegalStateException.class);
     }
@@ -107,6 +119,7 @@ class GovernedEvolutionTest {
         Map<String, Object> candidate = propose(f, "L1", "LOW", null, false, "proposer");
         String id = text(candidate, "ID");
 
+        // 提案者不能兼任评测者，降低自评放行与选择性指标报告风险。
         assertThatThrownBy(() -> evolution.evaluate(id, "proposer", "train://1", "regression://1",
                 "vault://holdout/1", f.suiteId, f.manifest.getId(), goodMetrics(), true))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -115,6 +128,7 @@ class GovernedEvolutionTest {
         Map<String, Object> evaluated = evolution.evaluate(id, "independent-evaluator", "train://1",
                 "regression://1", "vault://holdout/1", f.suiteId, f.manifest.getId(),
                 goodMetrics(), true);
+        // 候选 patch 不得含 holdout 引用或秘密；否则生成器可能针对隐藏样本过拟合。
         assertThat(text(evaluated, "PATCH_JSON")).doesNotContain("vault://", "hidden-secret");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM candidate_evaluation"
                 + " WHERE candidate_id=?", Integer.class, id)).isEqualTo(1);
@@ -131,6 +145,7 @@ class GovernedEvolutionTest {
 
         assertThat(text(evolution.rollback(id, "operator", "canary regression"), "STATUS"))
                 .isEqualTo("ROLLED_BACK");
+        // 回滚撤销新版本但不删除它，且父版本一直保持 PUBLISHED，可复现恢复并保留取证链。
         assertThat(registry.getById(promotedAssetId).getStatus())
                 .isEqualTo(VersionedAsset.Status.REVOKED);
         assertThat(registry.getById(f.asset.getId()).getStatus())
@@ -149,6 +164,7 @@ class GovernedEvolutionTest {
 
         assertThat(findings).extracting(row -> text(row, "FINDING_TYPE"))
                 .contains("DUPLICATE", "PROMPT_BLOAT", "MODEL_INCOMPATIBLE");
+        // 启发式扫描只能产生 finding；即使同时命中多个风险，也不能自动改写或删除资产。
         assertThat(registry.getById(first.getId()).getStatus()).isEqualTo(VersionedAsset.Status.PUBLISHED);
         assertThat(registry.getById(second.getId()).getStatus()).isEqualTo(VersionedAsset.Status.PUBLISHED);
     }

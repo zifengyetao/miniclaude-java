@@ -17,6 +17,12 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 
+/**
+ * 执行发布评测并形成 release gate 决策。
+ *
+ * <p>门禁采用“任一失败即阻断”：安全执行失败拥有独立否决权，同时质量、安全下限以及成本、
+ * 延迟上限均须满足。缺少指标不是“未知但可发布”，而是非法输入；这样避免部分评测被误当 PASS。</p>
+ */
 @Service
 public class EvaluationService {
     private static final Type METRICS = new TypeToken<Map<String, Double>>() { }.getType();
@@ -46,6 +52,7 @@ public class EvaluationService {
     public Map<String, Object> run(String tenant, String suiteId, String manifestId,
                                    Map<String, Double> metrics, boolean safetyPassed, String actor) {
         validateMetricSet(metrics);
+        // 门禁绑定经过完整性校验的精确发布清单，避免评测对象与最终发布对象不一致。
         manifests.verify(manifestId);
         String thresholdJson = jdbc.queryForObject(
                 "SELECT thresholds_json FROM evaluation_suite WHERE id=? AND tenant_id=?",
@@ -61,6 +68,7 @@ public class EvaluationService {
                 resultHash, Timestamp.from(now), Timestamp.from(now));
 
         Map<String, Double> thresholds = gson.fromJson(thresholdJson, METRICS);
+        // 保留全部失败原因便于审计；decision 只有在原因集合为空时才为 PASS。
         List<String> reasons = gateReasons(thresholds, metrics, safetyPassed);
         String decision = reasons.isEmpty() ? "PASS" : "FAIL";
         String gateId = UUID.randomUUID().toString();
@@ -80,6 +88,7 @@ public class EvaluationService {
     public static List<String> gateReasons(Map<String, Double> thresholds, Map<String, Double> metrics,
                                            boolean safetyPassed) {
         List<String> reasons = new ArrayList<>();
+        // safetyPassed 是硬否决信号，不能被高质量分或低成本抵消。
         if (!safetyPassed) reasons.add("safety execution failed (veto)");
         below(metrics, thresholds, "quality", reasons);
         below(metrics, thresholds, "safety", reasons);

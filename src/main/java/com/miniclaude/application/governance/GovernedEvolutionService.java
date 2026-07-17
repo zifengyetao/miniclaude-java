@@ -20,6 +20,17 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+/**
+ * 受控进化编排器。
+ *
+ * <p>候选遵循 PROPOSED → EVALUATED → REVIEWED（L3 允许在严格边界内跳过人工复核）
+ * → SHADOW → CANARY → PROMOTED；任一评测或复核失败进入 REJECTED，活动发布可进入
+ * ROLLED_BACK。所有迁移使用“当前状态”条件更新，非法跳级和并发重复推进均失败关闭。</p>
+ *
+ * <p>L0 仅观察；L1 必须人工晋升；L2 还要求指定 owner 批准；L3 只有 allowlist 内、
+ * 非受监管、低风险的 PROMPT/SKILL CONTENT 变更可自动晋升。权限、规则和不变量变更不因
+ * 标记为 L3 就获得自动写生产能力。</p>
+ */
 @Service
 public class GovernedEvolutionService {
     private final JdbcTemplate jdbc;
@@ -79,10 +90,12 @@ public class GovernedEvolutionService {
                                        boolean regulated, String proposerId) {
         validateLevel(level);
         validateChangeClass(changeClass);
+        // 受监管主体上限为 L1：更高成熟度不能用来削弱强制人工控制。
         if (regulated && ("L2".equals(level) || "L3".equals(level))) {
             throw new IllegalStateException(
                     "regulated agents are capped at L1; automatic promotion is forbidden");
         }
+        // L0 只收集经验，不生成可部署候选，防止“观察模式”意外获得生产写路径。
         if ("L0".equals(level)) {
             throw new IllegalStateException("L0 is observe-only and cannot produce a deployable candidate");
         }
@@ -90,12 +103,14 @@ public class GovernedEvolutionService {
         sameTenant(tenant, text(observation, "TENANT_ID"));
         VersionedAsset parent = registry.getById(parentAssetId);
         sameTenant(tenant, parent.getTenantId());
+        // 候选必须从稳定、可复现基线派生；草稿父版本会让评测对象随编辑漂移。
         if (parent.getStatus() != VersionedAsset.Status.PUBLISHED) {
             throw new IllegalStateException("candidate parent must be a stable published asset");
         }
         if (parent.getType() != assetType || !parent.getKey().equals(assetKey)) {
             throw new IllegalArgumentException("candidate target must match its parent asset");
         }
+        // Evolver 只看到观察摘要和父内容，返回差异；它没有 Registry、发布或 holdout 访问能力。
         Evolver.Proposal proposal = evolver.propose(new Evolver.Input(
                 text(observation, "SUMMARY"), parent.getContent(), assetType, applicability));
         String patchHash = GovernanceHash.sha256(proposal.getPatch());
@@ -126,11 +141,16 @@ public class GovernedEvolutionService {
                                         String suiteId, String manifestId, Map<String, Double> metrics,
                                         boolean safetyPassed) {
         Map<String, Object> candidate = requireStatus(candidateId, "PROPOSED");
+        // 职责分离降低提案者选择性报告指标、为自己的候选放行的风险。
         if (evaluatorId.equals(text(candidate, "PROPOSER_ID"))) {
             throw new IllegalArgumentException("proposer and evaluator must be different principals");
         }
         require(trainingSetRef, "trainingSetRef");
         require(regressionSetRef, "regressionSetRef");
+        /*
+         * hidden holdout 只以隔离存储引用进入评测记录，不传给 Evolver，也不拼入 patch。
+         * 若候选生成端能看到隐藏样本，就可能针对样本过拟合并获得虚假门禁 PASS。
+         */
         require(hiddenHoldoutRef, "hiddenHoldoutRef");
         String tenant = text(candidate, "TENANT_ID");
         Map<String, Object> gate = evaluations.run(tenant, suiteId, manifestId, metrics,
@@ -148,6 +168,7 @@ public class GovernedEvolutionService {
                 id, candidateId, tenant, evaluatorId, trainingSetRef, regressionSetRef, hiddenHoldoutRef,
                 null, suiteId, manifestId, gateId, metricsJson, decision, resultHash,
                 Timestamp.from(Instant.now()));
+        // release gate 失败直接终止候选，不允许带着失败结果继续复核或灰度。
         transition(candidateId, "PROPOSED", "PASS".equals(decision) ? "EVALUATED" : "REJECTED");
         audit.append(tenant, "USER", evaluatorId, "CANDIDATE_EVALUATED", "CANDIDATE", candidateId,
                 decision, resultHash, null, null);
@@ -181,6 +202,7 @@ public class GovernedEvolutionService {
     public Map<String, Object> shadow(String candidateId, String actor, Map<String, Double> metrics) {
         Map<String, Object> candidate = candidate(candidateId);
         String status = text(candidate, "STATUS");
+        // 唯一免人工复核入口是满足完整 L3 自动边界；任一条件不满足都要求 REVIEWED。
         if (!"REVIEWED".equals(status) && !canAutoPromote(candidate)) {
             throw new IllegalStateException("candidate must be reviewed before shadow rollout");
         }
@@ -208,6 +230,7 @@ public class GovernedEvolutionService {
         if ("L2".equals(level) && !hasOwnerApproval(candidateId, text(candidate, "OWNER_ID"))) {
             throw new IllegalStateException("L2 requires owner approval");
         }
+        // 自动化请求必须重新检查边界，不能依赖提案阶段的自报等级或先前检查结果。
         if (automatic && !canAutoPromote(candidate)) {
             throw new IllegalStateException("candidate is outside the L3 automatic promotion boundary");
         }
@@ -216,6 +239,7 @@ public class GovernedEvolutionService {
         }
         VersionedAsset parent = registry.getById(text(candidate, "PARENT_ASSET_ID"));
         String patch = text(candidate, "PATCH_JSON");
+        // 在获得生产写能力前复算 patch hash；评测后被替换的差异必须阻断晋升。
         if (!GovernanceHash.sha256(patch).equals(text(candidate, "PATCH_HASH"))) {
             throw new IllegalStateException("candidate patch hash mismatch");
         }
@@ -242,6 +266,10 @@ public class GovernedEvolutionService {
             throw new IllegalStateException("only an active rollout can be rolled back");
         }
         String promotedAssetId = text(candidate, "PROMOTED_ASSET_ID");
+        /*
+         * 回滚不删除晋升版本：将其 REVOKED 以禁止新运行继续解析，同时保留内容和谱系供取证。
+         * 父资产从未被原地修改，因此天然仍是 PUBLISHED 的稳定回退基线。
+         */
         if (promotedAssetId != null) registry.revoke(promotedAssetId, actor, reason);
         createRollout(candidate, "ROLLBACK", 0, actor,
                 Collections.singletonMap("rollback", 1.0), promotedAssetId);
@@ -288,6 +316,7 @@ public class GovernedEvolutionService {
     private boolean canAutoPromote(Map<String, Object> candidate) {
         String type = text(candidate, "ASSET_TYPE");
         String key = text(candidate, "ASSET_KEY");
+        // 所有条件为 AND；allowlist 默认空，配置遗漏时自动晋升能力保持关闭。
         return "L3".equals(text(candidate, "MATURITY_LEVEL"))
                 && ("PROMPT".equals(type) || "SKILL".equals(type))
                 && "CONTENT".equals(text(candidate, "CHANGE_CLASS"))
@@ -318,6 +347,7 @@ public class GovernedEvolutionService {
     }
 
     private void transition(String id, String from, String to) {
+        // 比较并交换式状态迁移：并发操作者只有一个能成功，避免重复晋升或越级。
         int updated = jdbc.update("UPDATE evolution_candidate SET status=?,updated_at=?"
                         + " WHERE id=? AND status=?",
                 to, Timestamp.from(Instant.now()), id, from);

@@ -15,6 +15,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * 使用 JDBC 表 {@code agent_definition} 实现员工定义仓储。
+ *
+ * <p>适配器负责领域枚举、执行模式集合与关系字段的双向映射，不承担领域校验。
+ * 写入采用先更新后插入的兼容式 upsert，原子性依赖调用方事务；并发首次写入同一标识
+ * 可能触发数据库唯一键冲突。
+ */
 @Repository
 public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository {
 
@@ -37,6 +44,10 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         this.jdbc = jdbc;
     }
 
+    /**
+     * 按标识更新定义，未命中时插入。参数必须是有效领域对象；数据库约束或连接失败向上传播。
+     * 对已存在记录重复保存同一快照结果等价，但首次并发保存不保证无冲突。
+     */
     @Override
     public AgentDefinition save(AgentDefinition definition) {
         int updated = jdbc.update(
@@ -52,6 +63,7 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
                 formatModes(definition.getExecutionModes()),
                 Timestamp.from(definition.getUpdatedAt()),
                 definition.getId());
+        // 只有更新未命中才插入，兼顾新建和保存快照；事务负责避免中间状态泄露。
         if (updated == 0) {
             jdbc.update(
                     "INSERT INTO agent_definition "

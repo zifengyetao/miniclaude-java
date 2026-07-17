@@ -11,6 +11,12 @@ import java.sql.Timestamp;
 import java.util.List;
 import java.util.Optional;
 
+/**
+ * 使用 JDBC 表 {@code agent_run} 实现运行快照仓储。
+ *
+ * <p>本类只映射和保存快照，不执行状态机或调度。保存采用先更新后插入，事务原子性依赖
+ * 上层；虽然持久化了版本字段，当前 SQL 并未用它进行乐观锁条件判断。
+ */
 @Repository
 public class JdbcAgentRunRepository implements AgentRunRepository {
 
@@ -36,6 +42,10 @@ public class JdbcAgentRunRepository implements AgentRunRepository {
         this.jdbc = jdbc;
     }
 
+    /**
+     * 按运行标识更新快照，未命中时插入。数据库失败向上传播；对现有记录重复保存同一
+     * 快照结果等价，但并发更新遵循最后写入生效，并发首次插入可能发生唯一键冲突。
+     */
     @Override
     public AgentRun save(AgentRun run) {
         int updated = jdbc.update(
@@ -52,6 +62,7 @@ public class JdbcAgentRunRepository implements AgentRunRepository {
                 run.getCostUsd(),
                 run.getTimeoutAt() == null ? null : Timestamp.from(run.getTimeoutAt()),
                 run.getId());
+        // 更新未命中才进入插入路径；调用方事务决定两条语句之间是否可被并发观察。
         if (updated == 0) {
             jdbc.update(
                     "INSERT INTO agent_run "

@@ -17,6 +17,13 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * 以 JDBC 实现事件、checkpoint 与审批三个持久契约。
+ *
+ * <p>所有写入先锁定所属运行，以同一把行锁串行分配跨表序列；因此事件、快照和审批可以
+ * 合并为一条稳定时间线。数据库唯一约束负责兜住并发幂等冲突，事务负责避免只写入其中
+ * 一部分。任何摘要、版本或状态不匹配都按 fail-closed 处理。</p>
+ */
 @Repository
 public class JdbcDurableStore implements DurableStores.RunEventStore,
         DurableStores.CheckpointStore, DurableStores.ApprovalService {
@@ -32,6 +39,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                            String idempotencyKey, String payload) {
         require(tenantId, "tenantId"); require(runId, "runId"); require(type, "type");
         require(idempotencyKey, "idempotencyKey");
+        // 对运行加行锁后再查重和分配序列，避免两个并发写入拿到同一“下一序号”。
         lockRun(tenantId, runId);
         String normalized = payload == null ? "{}" : payload;
         String hash = sha256(normalized);
@@ -40,6 +48,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                 this::event, tenantId, runId, idempotencyKey);
         if (!existing.isEmpty()) {
             RunEvent event = existing.get(0);
+            // 幂等只允许完全相同的业务意图重放；同键异载荷可能掩盖调用方错误，必须拒绝。
             if (!event.getPayloadHash().equals(hash) || !event.getType().equals(type)) {
                 throw new IllegalStateException("idempotency key reused with different event");
             }
@@ -69,6 +78,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
         lockRun(tenantId, runId);
         String normalized = state == null ? "{}" : state;
         long sequence = nextSequence(tenantId, runId);
+        // step 内版本支持同一步多次形成快照；不覆盖旧值才能保留完整恢复与审计轨迹。
         Long version = jdbc.queryForObject(
                 "SELECT COALESCE(MAX(version),0)+1 FROM run_checkpoint "
                         + "WHERE tenant_id=? AND run_id=? AND step_id=?",
@@ -102,11 +112,13 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                                    String actionParameters, Duration ttl) {
         require(actionType, "actionType"); require(actionParameters, "actionParameters");
         lockRun(tenantId, runId);
+        // 非正 TTL 会产生无法安全解释的授权窗口，因此在写入前直接拒绝。
         if (ttl == null || ttl.isZero() || ttl.isNegative()) {
             throw new IllegalArgumentException("approval ttl must be positive");
         }
         Instant now = Instant.now();
         long sequence = nextSequence(tenantId, runId);
+        // 只持久化参数摘要作为审批绑定证据；决定时重算并比较，参数被替换即不授权。
         ApprovalRequest request = new ApprovalRequest(UUID.randomUUID().toString(), tenantId, runId,
                 stepId, sequence, 1, actionType, actionParameters, sha256(actionParameters),
                 ApprovalRequest.Status.PENDING, now, now.plus(ttl), null, null, null);
@@ -134,11 +146,13 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
         if (current.getStatus() != ApprovalRequest.Status.PENDING) {
             throw new IllegalStateException("approval is not pending: " + current.getStatus());
         }
+        // 审批对象是“这一组参数”而非抽象动作类型；任何字节级变化都按未获批准处理。
         if (!current.getActionHash().equals(sha256(expectedParameters == null ? "" : expectedParameters))) {
             throw new IllegalStateException("approval action parameters changed");
         }
         Instant now = Instant.now();
         if (!now.isBefore(current.getExpiresAt())) {
+            // 先将过期事实落库再拒绝，后续读取不会继续把该请求误显示为可决定。
             jdbc.update("UPDATE approval_request SET status='EXPIRED',version=version+1,"
                     + "decided_at=? WHERE id=? AND status='PENDING'", Timestamp.from(now), approvalId);
             throw new IllegalStateException("approval expired");
@@ -148,6 +162,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                         + "WHERE id=? AND tenant_id=? AND status='PENDING' AND expires_at>?",
                 decision.name(), Timestamp.from(now), actor, reason, approvalId, tenantId,
                 Timestamp.from(now));
+        // 条件更新保证审批只能被决定一次；并发落败者不能覆盖先到决定。
         if (changed != 1) throw new IllegalStateException("approval decision lost race");
         append(tenantId, current.getRunId(), current.getStepId(), "APPROVAL_" + decision.name(),
                 "approval-decision:" + approvalId, "{\"approvalId\":\"" + approvalId + "\"}");
@@ -173,12 +188,15 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
     }
 
     private void expirePending(String tenantId) {
+        // 读取前惰性物化过期状态，使“未运行后台清理任务”不会扩大授权有效期。
         jdbc.update("UPDATE approval_request SET status='EXPIRED',version=version+1,decided_at=? "
                         + "WHERE tenant_id=? AND status='PENDING' AND expires_at<=?",
                 Timestamp.from(Instant.now()), tenantId, Timestamp.from(Instant.now()));
     }
 
     private long nextSequence(String tenantId, String runId) {
+        // 序列跨三张表计算，才能按一个数字还原“事件—快照—审批”的真实提交顺序。
+        // 调用者已经持有运行行锁，因此 MAX+1 在同一运行内不会并发冲突。
         Long value = jdbc.queryForObject(
                 "SELECT COALESCE(MAX(sequence_no),0)+1 FROM ("
                         + "SELECT sequence_no FROM run_event WHERE tenant_id=? AND run_id=? "
@@ -190,6 +208,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
     }
 
     private void lockRun(String tenantId, String runId) {
+        // 运行行既是存在性/租户校验，也是所有持久子记录共享的序列化锁。
         List<String> ids = jdbc.query("SELECT id FROM agent_run WHERE tenant_id=? AND id=? FOR UPDATE",
                 (rs, row) -> rs.getString(1), tenantId, runId);
         if (ids.isEmpty()) throw new IllegalArgumentException("run not found");
@@ -221,6 +240,11 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                 rs.getString("decision_reason"));
     }
 
+    /**
+     * 计算稳定的十六进制 SHA-256 摘要，用于检测持久载荷或审批参数变化。
+     *
+     * <p>摘要用于完整性绑定，不替代签名、加密或身份认证。</p>
+     */
     public static String sha256(String value) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
@@ -229,6 +253,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
             for (byte b : digest) hex.append(String.format("%02x", b));
             return hex.toString();
         } catch (Exception impossible) {
+            // 运行环境缺少标准算法时不能降级为弱摘要，否则审批绑定与幂等比较失去保证。
             throw new IllegalStateException("SHA-256 unavailable", impossible);
         }
     }

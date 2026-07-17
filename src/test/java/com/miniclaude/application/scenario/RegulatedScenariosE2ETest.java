@@ -29,6 +29,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "platform.orchestrator=local"
 })
 @AutoConfigureMockMvc
+/**
+ * 受监管仿真场景的端到端安全契约测试。
+ *
+ * <p>覆盖 PII、风控仅建议、确定性交易限额、四眼职责分离、kill switch 和“无 submit”
+ * 能力。所有数据来自 deterministic fake，断言旨在证明系统即使获批也只生成仿真制品。</p>
+ */
 class RegulatedScenariosE2ETest {
     @Autowired RegulatedScenarioService scenarios;
     @Autowired MockMvc mvc;
@@ -64,6 +70,7 @@ class RegulatedScenariosE2ETest {
         Map<String, Object> input = investigation("reviewer@example.com 13800138000");
         AgentRun waiting = scenarios.start(tenant, RegulatedScenarioCatalog.INVESTIGATION,
                 input, "investigation-idempotency");
+        // 相同幂等键必须复用运行，避免同一调查被重试成两套审批。
         AgentRun replay = scenarios.start(tenant, RegulatedScenarioCatalog.INVESTIGATION,
                 input, "investigation-idempotency");
         assertThat(waiting.getStatus()).isEqualTo(AgentRun.Status.WAITING_APPROVAL);
@@ -84,6 +91,7 @@ class RegulatedScenariosE2ETest {
 
     @Test
     void blocksAutomaticAdverseDecision() {
+        // why：BAN 属于自动客户不利决定，超出 REVIEW/ESCALATE 建议白名单。
         Map<String, Object> input = investigation("masked");
         input.put("requestedAction", "BAN");
         AgentRun run = scenarios.start("regulated-auto-block",
@@ -95,6 +103,7 @@ class RegulatedScenariosE2ETest {
 
     @Test
     void deterministicRiskEngineBlocksLimitsAndStaleMarket() {
+        // 硬限额和行情时效先于人工审批，不能靠审批覆盖确定性安全策略。
         Map<String, Object> limit = trade();
         limit.put("quantity", 2000);
         AgentRun limited = scenarios.start("regulated-limit",
@@ -114,6 +123,7 @@ class RegulatedScenariosE2ETest {
 
     @Test
     void oneApprovalIsInsufficient() {
+        // 四眼不是“存在审批即可”，恢复点必须看到两个不同非提案人。
         String tenant = "regulated-single-approval";
         AgentRun run = scenarios.start(tenant, RegulatedScenarioCatalog.TRADING, trade(), null);
         ApprovalRequest first = scenarios.approvalStage(tenant, run.getId()).get(0);
@@ -126,6 +136,7 @@ class RegulatedScenariosE2ETest {
 
     @Test
     void samePersonCannotApproveTwiceAndProposerCannotApprove() {
+        // 同人重复批准和提案人自批分别验证人数与职责分离两项独立约束。
         String tenant = "regulated-separation";
         AgentRun run = scenarios.start(tenant, RegulatedScenarioCatalog.TRADING, trade(), null);
         List<ApprovalRequest> requests = scenarios.approvalStage(tenant, run.getId());
@@ -141,6 +152,7 @@ class RegulatedScenariosE2ETest {
 
     @Test
     void killSwitchStopsNewRuns() {
+        // kill switch 是租户级紧急阻断，开启后连新运行创建都不允许。
         String tenant = "regulated-killed";
         scenarios.setKillSwitch(tenant, true, "security-officer");
         assertThatThrownBy(() -> scenarios.start(
@@ -151,6 +163,7 @@ class RegulatedScenariosE2ETest {
 
     @Test
     void approvedTradeCreatesDraftWithoutAnySubmitCapability() {
+        // why：两人批准只授权生成草稿；反射检查进一步证明端口根本没有提交方法。
         String tenant = "regulated-trade-draft";
         AgentRun run = scenarios.start(tenant, RegulatedScenarioCatalog.TRADING, trade(), null);
         approveBoth(tenant, run.getId(), "approver-a", "approver-b");

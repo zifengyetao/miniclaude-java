@@ -6,18 +6,31 @@ import io.temporal.workflow.SignalMethod;
 import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
 
-/** Temporal 边界契约；业务层不依赖 Temporal 类型。 */
+/**
+ * Temporal 持久运行的 Workflow 边界契约。
+ *
+ * <p>Workflow 负责可重放的控制流，数据库副作用必须经 {@link Activities} 执行；
+ * 领域与应用层只依赖 {@code DurableOrchestrator}，从而不传播 Temporal SDK 类型。
+ * Signal 表达异步控制意图，Query 只读取快照，不应改变 Workflow 状态。</p>
+ */
 @WorkflowInterface
 public interface DurableRunWorkflow {
+    /** 启动并持续编排一个运行；实现必须保持 Temporal 重放确定性。 */
     @WorkflowMethod
     void execute(Input input);
 
+    /** 请求暂停后续步骤。 */
     @SignalMethod void pause();
+    /** 请求从暂停状态恢复。 */
     @SignalMethod void resume();
+    /** 请求取消并阻止后续副作用。 */
     @SignalMethod void cancel();
+    /** 提交与审批 ID、决定及动作摘要绑定的审批信号。 */
     @SignalMethod void approvalDecision(String approvalId, String decision, String actionHash);
+    /** 返回当前持久进度的只读视图。 */
     @QueryMethod Snapshot snapshot();
 
+    /** Workflow 的稳定启动参数；只包含可序列化且重放所需的数据。 */
     final class Input {
         public String tenantId;
         public String runId;
@@ -25,6 +38,7 @@ public interface DurableRunWorkflow {
         public long timeoutSeconds;
     }
 
+    /** Query 返回的最小状态视图，checkpoint 摘要用于核对恢复基线。 */
     final class Snapshot {
         public String runId;
         public String status;
@@ -32,11 +46,20 @@ public interface DurableRunWorkflow {
         public String checkpointHash;
     }
 
+    /**
+     * Workflow 调用的非确定性持久化 Activity 契约。
+     *
+     * <p>Activity 可能被 Temporal 至少一次投递，具体实现必须使用确定的幂等键，
+     * 并在状态、事件或 checkpoint 不一致时失败而不是猜测成功。</p>
+     */
     @ActivityInterface
     interface Activities {
+        /** 从权威存储加载恢复快照。 */
         Snapshot load(String tenantId, String runId);
+        /** 幂等持久化一次状态转换及其审计事件。 */
         void persistTransition(String tenantId, String runId, String eventType,
                                String idempotencyKey, String payload);
+        /** 保存步骤完成后的恢复点。 */
         void persistCheckpoint(String tenantId, String runId, String stepId, String state);
     }
 }

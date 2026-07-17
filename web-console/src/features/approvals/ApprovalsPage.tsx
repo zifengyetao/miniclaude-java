@@ -1,3 +1,7 @@
+/**
+ * 审批中心聚合各运行的审批请求，并允许人工审查动作参数后批准或拒绝。
+ * 页面限制和按钮状态不是安全边界，服务端必须校验审批权限、时效与动作完整性。
+ */
 import { Check, ShieldCheck, X } from 'lucide-react'
 import { useState } from 'react'
 import { platformApi } from '../../shared/api/client'
@@ -14,6 +18,7 @@ export function ApprovalsPage() {
   const [reason, setReason] = useState('')
   const [busy, setBusy] = useState(false)
 
+  /** 提交当前审批决定并刷新列表；busy 仅防止界面内重复点击，不替代服务端幂等与并发校验。 */
   async function decide(decision: 'APPROVED' | 'REJECTED') {
     if (!selected) return
     setBusy(true)
@@ -22,7 +27,7 @@ export function ApprovalsPage() {
   }
 
   const pending = approvals.data?.filter((item) => item.status === 'PENDING') ?? []
-  return <div className="page"><div className="page-heading"><div><span className="eyebrow">Human in the loop</span><h1>审批中心</h1><p>审查运行中的高风险动作并提交不可变决策。</p></div><span className="counter">{pending.length} 项待处理</span></div><AsyncView loading={approvals.loading} error={approvals.error} empty={approvals.data?.length === 0} emptyText="暂无审批请求" onRetry={approvals.reload}><section className="approval-grid">{approvals.data?.map((approval) => <article className="approval-card" key={approval.id}><header><span className="agent-icon"><ShieldCheck size={18} /></span><span className="tag">{approval.status}</span></header><h2>{approval.actionType}</h2><p>{approval.actionParameters}</p><dl><div><dt>运行</dt><dd>{approval.runId.slice(0, 12)}</dd></div><div><dt>步骤</dt><dd>{approval.stepId}</dd></div><div><dt>到期</dt><dd>{new Date(approval.expiresAt).toLocaleString()}</dd></div></dl>{approval.status === 'PENDING' && <button className="button secondary full" onClick={() => setSelected(approval)}>处理审批</button>}</article>)}</section></AsyncView>
-    {selected && <div className="modal-backdrop"><section className="modal"><header><div><h2>审批决策</h2><p>{selected.actionType} · {selected.stepId}</p></div><button onClick={() => setSelected(null)}><X size={18} /></button></header><div className="form-grid"><label className="full">决策原因<textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="记录批准或拒绝依据" /></label><div className="code-block full">{selected.actionParameters}</div></div><footer><button className="button danger" disabled={busy} onClick={() => void decide('REJECTED')}><X size={14} />拒绝</button><button className="button primary" disabled={busy} onClick={() => void decide('APPROVED')}><Check size={14} />批准</button></footer></section></div>}
+  return <div className="page"><div className="page-heading"><div><span className="eyebrow">Human in the loop</span><h1>审批中心</h1><p>审查运行中的高风险动作并提交不可变决策。</p></div><span className="counter">{pending.length} 项待处理</span></div>{/* 证据展示区：呈现服务端返回的动作参数、运行步骤与到期时间供人工复核。 */}<AsyncView loading={approvals.loading} error={approvals.error} empty={approvals.data?.length === 0} emptyText="暂无审批请求" onRetry={approvals.reload}><section className="approval-grid">{approvals.data?.map((approval) => <article className="approval-card" key={approval.id}><header><span className="agent-icon"><ShieldCheck size={18} /></span><span className="tag">{approval.status}</span></header><h2>{approval.actionType}</h2><p>{approval.actionParameters}</p><dl><div><dt>运行</dt><dd>{approval.runId.slice(0, 12)}</dd></div><div><dt>步骤</dt><dd>{approval.stepId}</dd></div><div><dt>到期</dt><dd>{new Date(approval.expiresAt).toLocaleString()}</dd></div></dl>{approval.status === 'PENDING' && <button className="button secondary full" onClick={() => setSelected(approval)}>处理审批</button>}</article>)}</section></AsyncView>
+    {/* 安全确认区：提交批准或拒绝前再次展示原始动作参数并要求记录原因。 */}{selected && <div className="modal-backdrop"><section className="modal"><header><div><h2>审批决策</h2><p>{selected.actionType} · {selected.stepId}</p></div><button onClick={() => setSelected(null)}><X size={18} /></button></header><div className="form-grid"><label className="full">决策原因<textarea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="记录批准或拒绝依据" /></label><div className="code-block full">{selected.actionParameters}</div></div><footer><button className="button danger" disabled={busy} onClick={() => void decide('REJECTED')}><X size={14} />拒绝</button><button className="button primary" disabled={busy} onClick={() => void decide('APPROVED')}><Check size={14} />批准</button></footer></section></div>}
   </div>
 }

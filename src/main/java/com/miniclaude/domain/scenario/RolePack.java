@@ -7,8 +7,16 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-/** 一个可复现的场景包；所有依赖必须固定到精确版本。 */
+/**
+ * 一个可复现、可审计的场景角色包。
+ *
+ * <p>RolePack 描述“由谁、按什么流程、受哪些约束执行”：agentSpec 定义角色，
+ * GraphSpec 定义节点及流转顺序，rules/skills/verifiers/evalSuite 则固定安全规则、
+ * 能力、验证器和评测集。所有引用都要求精确版本，避免同一次场景在依赖漂移后
+ * 得到不可复现的行为。</p>
+ */
 public final class RolePack {
+    /** 指向一个不可漂移的版本化依赖；禁止 latest、通配符和版本区间。 */
     public static final class VersionRef {
         private final String key;
         private final String version;
@@ -47,12 +55,14 @@ public final class RolePack {
     }
 
     private static List<VersionRef> immutable(List<VersionRef> value) {
+        // why：场景包缺少任一类约束都不应退化为“无约束执行”，因此空引用直接失败。
         if (value == null || value.isEmpty()) throw new IllegalArgumentException("version refs required");
         return Collections.unmodifiableList(new ArrayList<>(value));
     }
 
     private static String exact(String value) {
         String normalized = text(value, "version");
+        // why：动态版本会让规则、验证器或评测集静默变化，破坏审计和结果复现。
         if ("latest".equalsIgnoreCase(normalized) || normalized.contains("*")
                 || normalized.contains("[") || normalized.contains("(")) {
             throw new IllegalArgumentException("exact version required");

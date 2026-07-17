@@ -12,6 +12,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * 图静态校验端点的可变 HTTP 请求 DTO。
+ *
+ * <p>Bean Validation 负责 JSON 结构与基础数值约束，{@link GraphSpec} 和校验器负责节点
+ * 唯一性、端点、可达性及循环规则。内部 DTO 只服务反序列化和领域转换。
+ */
 public class ValidateGraphRequest {
 
     @NotBlank
@@ -29,6 +35,12 @@ public class ValidateGraphRequest {
     @NotNull
     private LimitsRequest limits;
 
+    /**
+     * 将已完成 Bean Validation 的请求转换为不可变领域图。
+     *
+     * <p>前置条件是节点、边和限制对象均非空且内部字段有效；否则可能抛出空指针或领域参数
+     * 异常。转换不修改请求且无外部副作用，字段不被并发修改时可重复调用。
+     */
     public GraphSpec toGraphSpec() {
         return new GraphSpec(
                 name,
@@ -52,6 +64,7 @@ public class ValidateGraphRequest {
     public LimitsRequest getLimits() { return limits; }
     public void setLimits(LimitsRequest limits) { this.limits = limits; }
 
+    /** 单个图节点的传输表示。 */
     public static class NodeRequest {
         @NotBlank
         private String id;
@@ -68,6 +81,7 @@ public class ValidateGraphRequest {
         public void setReference(String reference) { this.reference = reference; }
     }
 
+    /** 单条有向边的传输表示。 */
     public static class EdgeRequest {
         @NotBlank
         private String from;
@@ -84,6 +98,7 @@ public class ValidateGraphRequest {
         public void setCondition(String condition) { this.condition = condition; }
     }
 
+    /** 图执行上限的传输表示；更复杂的循环约束留给领域校验。 */
     public static class LimitsRequest {
         @Positive
         private int maxSteps;

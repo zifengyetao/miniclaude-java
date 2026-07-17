@@ -1,3 +1,7 @@
+/**
+ * 智能体广场读取平台注册定义，并在浏览器内按名称、角色和描述过滤展示。
+ * 本地搜索与卡片可见性不代表调用权限，执行授权仍由服务端决定。
+ */
 import { Bot, Search } from 'lucide-react'
 import { useState } from 'react'
 import { platformApi } from '../shared/api/client'

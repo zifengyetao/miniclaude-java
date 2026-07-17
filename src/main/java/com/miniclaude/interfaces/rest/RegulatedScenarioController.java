@@ -24,6 +24,13 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/scenarios")
+/**
+ * 受监管仿真场景的统一 REST 边界。
+ *
+ * <p>所有请求都要求显式租户；start 支持幂等键，审批、恢复和 kill switch 操作继续
+ * 由服务层执行职责分离与期限检查。接口只暴露建议/草稿流程，不暴露客户不利决定或
+ * 订单 submit/placeOrder 端点。</p>
+ */
 public final class RegulatedScenarioController {
     private final RegulatedScenarioService scenarios;
 
@@ -96,6 +103,7 @@ public final class RegulatedScenarioController {
 
     private static String scenario(HttpServletRequest request) {
         String uri = request.getRequestURI();
+        // 映射只接受两个固定路径，不允许请求体自行指定并绕过相应场景策略。
         if (uri.contains("/" + RegulatedScenarioCatalog.INVESTIGATION + "/")) {
             return RegulatedScenarioCatalog.INVESTIGATION;
         }

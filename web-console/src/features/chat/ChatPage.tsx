@@ -1,3 +1,7 @@
+/**
+ * Chat 页面管理当前浏览器内消息、后端会话选择、最近运行和响应元数据展示。
+ * 发送接口为一次性请求/响应，不包含 SSE 流式增量、重连或历史消息回放。
+ */
 import { FileText, MessageSquarePlus, Send, Sparkles } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { chatApi, platformApi } from '../../shared/api/client'
@@ -14,6 +18,10 @@ export function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([])
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState('')
+  /**
+   * 乐观追加用户消息后调用聊天 API，再记录回复与元数据。
+   * 发送失败只恢复按钮并显示错误，不自动重试，避免无幂等保障时重复提交消息。
+   */
   async function send(event: FormEvent) {
     event.preventDefault()
     if (!input.trim()) return

@@ -65,10 +65,21 @@ public class SessionApplicationService {
      * 删除会话并释放引擎侧资源。
      */
     public void delete(String id) {
+        /*
+         * 必须先通知运行时释放模型/MCP/线程等会话资源，再删除元数据。反向执行会
+         * 失去构造上下文所需的 session 标识；即使底层会话不存在，closeSession
+         * 也应保持幂等，确保重复 DELETE 不产生资源泄漏。
+         */
         agentGateway.closeSession(newExecutionContext(id));
         sessionRepository.delete(id);
     }
 
+    /**
+     * 为会话管理动作创建最小执行上下文。
+     *
+     * <p>删除并不是一次业务推理 Run，但仍分配独立 runId/traceId，使资源释放动作
+     * 可以进入统一审计链。默认租户只是当前兼容层约定，后续应由认证上下文替换。
+     */
     private ExecutionContext newExecutionContext(String sessionId) {
         Path workspace = StringUtils.hasText(defaultSettings.getWorkingDirectory())
                 ? Paths.get(defaultSettings.getWorkingDirectory())

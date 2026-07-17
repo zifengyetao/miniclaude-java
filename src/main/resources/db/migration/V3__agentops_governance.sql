@@ -1,3 +1,4 @@
+-- AgentOps 治理基表。设计原则是“版本追加、精确解析、证据留存”，而非原地覆盖配置。
 CREATE TABLE versioned_asset (
     id VARCHAR(36) PRIMARY KEY,
     tenant_id VARCHAR(120) NOT NULL,
@@ -14,6 +15,7 @@ CREATE TABLE versioned_asset (
     published_at TIMESTAMP WITH TIME ZONE,
     deprecated_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT fk_asset_parent FOREIGN KEY (parent_id) REFERENCES versioned_asset(id),
+    -- 同一治理坐标不可重建；修订必须使用新 version，并可通过 parent_id 保留谱系。
     CONSTRAINT uk_asset_version UNIQUE (tenant_id, asset_type, asset_key, version)
 );
 CREATE INDEX idx_asset_resolve ON versioned_asset(tenant_id, asset_type, asset_key, version, status);
@@ -24,6 +26,7 @@ CREATE TABLE agent_release_manifest (
     agent_key VARCHAR(200) NOT NULL,
     version VARCHAR(64) NOT NULL,
     status VARCHAR(32) NOT NULL,
+    -- 保存 key@精确版本#内容哈希，不保存 latest/范围版本，确保发布可复现。
     assets_json TEXT NOT NULL,
     manifest_hash VARCHAR(64) NOT NULL,
     signature VARCHAR(500),
@@ -41,6 +44,7 @@ CREATE TABLE policy_rule (
     scope VARCHAR(500) NOT NULL,
     action_pattern VARCHAR(500) NOT NULL,
     resource_pattern VARCHAR(1000) NOT NULL,
+    -- priority 用于确定性排序；运行时 DENY 仍拥有跨优先级否决权（deny-first）。
     priority INTEGER NOT NULL,
     effect VARCHAR(32) NOT NULL,
     enabled BOOLEAN NOT NULL,
@@ -59,6 +63,7 @@ CREATE TABLE audit_event (
     resource_type VARCHAR(64) NOT NULL,
     resource_id VARCHAR(300) NOT NULL,
     decision VARCHAR(64),
+    -- 不落原始 payload；previous_hash 将同租户事件串成可验证链，历史篡改会传导到后续摘要。
     payload_hash VARCHAR(64) NOT NULL,
     previous_hash VARCHAR(64),
     event_hash VARCHAR(64) NOT NULL,
@@ -85,6 +90,7 @@ CREATE TABLE evaluation_run (
     manifest_id VARCHAR(36) NOT NULL,
     status VARCHAR(32) NOT NULL,
     metrics_json TEXT NOT NULL,
+    -- safety_passed 是 release gate 的硬否决输入，不能由其他优秀指标抵消。
     safety_passed BOOLEAN NOT NULL,
     result_hash VARCHAR(64) NOT NULL,
     started_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -98,6 +104,7 @@ CREATE TABLE release_gate (
     tenant_id VARCHAR(120) NOT NULL,
     evaluation_run_id VARCHAR(36) NOT NULL,
     manifest_id VARCHAR(36) NOT NULL,
+    -- 每次评测恰有一个门禁结论；只有 PASS 才能作为后续受控发布证据。
     decision VARCHAR(32) NOT NULL,
     reasons TEXT NOT NULL,
     decided_at TIMESTAMP WITH TIME ZONE NOT NULL,

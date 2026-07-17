@@ -8,9 +8,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** 供应商无关的 Agent 图编排定义。 */
+/**
+ * 供应商无关且不可变的 Agent 图编排定义。
+ *
+ * <p>该聚合描述节点、边和运行上限，只承载编排语义，不负责静态校验、持久化或执行。
+ * 构造时复制集合并建立节点索引，防止调用方随后修改集合而绕过图边界。
+ */
 public final class GraphSpec {
 
+    /** 节点的抽象能力类型，不绑定具体模型、工具或工作流引擎。 */
     public enum NodeType {
         DETERMINISTIC,
         LLM,
@@ -27,6 +33,7 @@ public final class GraphSpec {
         TERMINAL
     }
 
+    /** 图中的不可变节点；{@code reference} 由更外层的注册表解释。 */
     public static final class Node {
         private final String id;
         private final NodeType type;
@@ -43,6 +50,7 @@ public final class GraphSpec {
         public String getReference() { return reference; }
     }
 
+    /** 两个节点之间的有向边；条件字符串在本领域对象中保持为不透明值。 */
     public static final class Edge {
         private final String from;
         private final String to;
@@ -59,6 +67,7 @@ public final class GraphSpec {
         public String getCondition() { return condition; }
     }
 
+    /** 执行器必须遵守的步数、迭代次数和可选费用上限。 */
     public static final class Limits {
         private final int maxSteps;
         private final int maxIterations;
@@ -82,6 +91,13 @@ public final class GraphSpec {
     private final List<Edge> edges;
     private final Limits limits;
 
+    /**
+     * 创建图定义并对节点建立稳定顺序的索引。
+     *
+     * <p>名称、版本和入口不能为空，节点标识必须唯一，{@code limits} 必须存在；
+     * 更复杂的可达性、边端点和循环约束由 {@link GraphValidator} 负责。重复节点会抛出
+     * {@link IllegalArgumentException}。对象构造完成后不可变，适合跨线程只读共享。
+     */
     public GraphSpec(
             String name,
             String version,

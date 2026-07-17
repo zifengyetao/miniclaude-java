@@ -7,6 +7,11 @@ import java.nio.file.Paths;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 验证执行上下文的路径规范化和边界标识不变量。
+ *
+ * <p>测试仅覆盖词法路径处理；工作区授权和真实路径检查属于基础设施测试范围。
+ */
 class ExecutionContextTest {
 
     @Test

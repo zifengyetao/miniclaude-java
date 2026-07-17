@@ -1,3 +1,4 @@
+/** 定义应用外壳的静态导航项；菜单是否可见不代表用户拥有对应服务端权限。 */
 import { Bot, Boxes, Braces, CheckSquare, GitFork, LayoutDashboard, MessageSquare, Settings, ShieldCheck, Sparkles, type LucideIcon } from 'lucide-react'
 
 export interface NavItem { label: string; path: string; icon: LucideIcon }

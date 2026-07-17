@@ -1,3 +1,7 @@
+/**
+ * 平台管理页提供版本化资产草稿、策略试算和审计记录查询入口。
+ * 这些前端表单不授予管理权限；资产写入、策略判定和审计完整性均以服务端为准。
+ */
 import { FileKey, Play, ScrollText, ShieldCheck } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { governanceApi } from '../../shared/api/client'
@@ -15,11 +19,13 @@ export function AdminPage() {
   const [policy, setPolicy] = useState({ action: 'tool.execute', resource: 'workspace:*' })
   const [result, setResult] = useState('')
   const [busy, setBusy] = useState(false)
+  /** 创建资产草稿并刷新注册表，服务端负责版本冲突、内容完整性和写权限校验。 */
   async function createAsset(event: FormEvent) {
     event.preventDefault(); setBusy(true)
     try { await governanceApi.createAsset(asset); setAsset({ ...asset, key: '', content: '' }); await state.reload() }
     catch (cause) { setResult(cause instanceof Error ? cause.message : '创建失败') } finally { setBusy(false) }
   }
+  /** 请求服务端进行策略试算；页面结果用于解释，不应被客户端当作后续调用的授权令牌。 */
   async function evaluate(event: FormEvent) {
     event.preventDefault(); setBusy(true)
     try { const decision = await governanceApi.evaluatePolicy(policy.action, policy.resource); setResult(`${decision.outcome}: ${decision.reason}`) }

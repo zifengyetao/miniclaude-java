@@ -25,6 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>旧引擎仍依赖进程工作目录，因此仅允许与进程目录相同的显式 workspace；
  * 在引擎完成工作区隔离前，其他目录一律拒绝，且不会修改 {@code user.dir}。
+ * 适配器按工作区、租户和会话缓存旧引擎实例；同一会话串行执行，不同会话可并发。
  */
 @Component
 public class LegacyAgentRuntime implements AgentRuntime {
@@ -43,6 +44,13 @@ public class LegacyAgentRuntime implements AgentRuntime {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
     }
 
+    /**
+     * 在通过 API 密钥和工作区边界校验后执行一轮旧引擎会话。
+     *
+     * <p>请求必须非空，工作区必须存在且与进程工作区的真实路径一致。缺失密钥、越界路径、
+     * 工厂或旧引擎异常均向上传播；调用可能产生工具副作用，非幂等。同一会话通过实例锁
+     * 串行化，以保护旧引擎内部可变状态。
+     */
     @Override
     public AgentRuntimeResult execute(AgentRuntimeRequest request) {
         Objects.requireNonNull(request, "request");
@@ -51,6 +59,7 @@ public class LegacyAgentRuntime implements AgentRuntime {
         validate(settings, context);
 
         SessionKey key = SessionKey.from(context);
+        // 原子地为会话创建唯一实例，避免并发首轮请求各自持有一份不一致状态。
         LegacyAgentSession session = sessions.computeIfAbsent(
                 key, ignored -> agentFactory.create(settings));
         Map<String, Object> raw;
@@ -66,6 +75,10 @@ public class LegacyAgentRuntime implements AgentRuntime {
         return new AgentRuntimeResult(text, tokens, settings.getModel());
     }
 
+    /**
+     * 移除并关闭上下文对应的会话。不存在的会话会被忽略，重复调用不会重复关闭；
+     * 与执行并发时，仅保证映射移除的原子性，调用方应先停止新请求。
+     */
     @Override
     public void close(ExecutionContext context) {
         Objects.requireNonNull(context, "context");
@@ -73,6 +86,7 @@ public class LegacyAgentRuntime implements AgentRuntime {
         closeQuietly(context.getSessionId(), session);
     }
 
+    /** 容器停止时尽力关闭所有残留会话；单个关闭失败不会阻断其余资源释放。 */
     @PreDestroy
     public void shutdown() {
         sessions.forEach((key, session) -> closeQuietly(key.sessionId, session));
@@ -86,6 +100,7 @@ public class LegacyAgentRuntime implements AgentRuntime {
                             + "or miniclaude.api-key");
         }
         try {
+            // 比较真实路径而非词法路径，防止通过 .. 或符号链接绕过旧引擎的单工作区限制。
             Path processWorkspace = Paths.get("").toAbsolutePath().normalize().toRealPath();
             Path requestedWorkspace = context.getWorkspace().toRealPath();
             if (!processWorkspace.equals(requestedWorkspace)) {
@@ -103,6 +118,7 @@ public class LegacyAgentRuntime implements AgentRuntime {
                 .model(settings.getModel())
                 .thinking(settings.isThinking())
                 .apiKey(settings.getApiKey())
+                // HTTP 边界无法安全进行交互式确认，任何需要确认的高风险动作都失败关闭。
                 .confirmFn(message -> false);
 
         if (settings.getMaxCostUsd() != null) {
@@ -151,6 +167,7 @@ public class LegacyAgentRuntime implements AgentRuntime {
         try {
             return Integer.parseInt(String.valueOf(value));
         } catch (NumberFormatException ignored) {
+            // 旧引擎统计是非强类型数据；无法解释时按零处理，避免污染业务结果。
             return 0;
         }
     }

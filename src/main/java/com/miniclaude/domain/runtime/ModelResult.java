@@ -5,7 +5,10 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 模型调用结果。
+ * 供应商无关的模型调用结果。
+ *
+ * <p>本类只规范化生成文本和令牌统计，不表达停止原因、计费或安全判定；令牌映射在
+ * 构造时复制，避免调用方后续修改顶层统计。
  */
 public final class ModelResult {
 

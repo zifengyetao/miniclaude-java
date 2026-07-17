@@ -20,6 +20,13 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1/scenarios")
+/**
+ * 试点场景的 REST 边界。
+ *
+ * <p>控制器只负责 HTTP 参数归一化和路由，具体的工作区隔离、SQL guard、PII 脱敏、
+ * 人工转接及租户校验均由应用服务执行。返回的是运行状态和场景制品，不暗示已创建
+ * 外部 PR、执行真实数据库查询或发送客服回复。</p>
+ */
 public class PilotScenarioController {
     private final PilotScenarioService scenarios;
 
@@ -61,6 +68,7 @@ public class PilotScenarioController {
     }
 
     private List<ScenarioArtifact> statusAndArtifacts(String tenant, String scenario, String runId) {
+        // 先复用 status 校验场景与租户，再读取制品，避免跨租户仅凭 runId 枚举数据。
         status(tenant, scenario, runId);
         return scenarios.artifacts(tenant, runId);
     }

@@ -1,3 +1,4 @@
+/** 验证统一 API 客户端的会话凭据请求头和类型化错误转换。 */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, credentials } from './client'
 

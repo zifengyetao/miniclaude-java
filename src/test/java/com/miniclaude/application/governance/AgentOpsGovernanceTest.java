@@ -19,6 +19,12 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * AgentOps 治理不变量的集成测试。
+ *
+ * <p>这些断言关注失败模式而非普通 CRUD：版本覆盖和动态解析必须失败，DENY/冲突必须关闭，
+ * 安全失败必须否决 release gate，审计事件必须连接前序 hash。</p>
+ */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:governance-test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
         "spring.datasource.driver-class-name=org.h2.Driver"
@@ -37,9 +43,11 @@ class AgentOpsGovernanceTest {
         VersionedAsset published = registry.publish(draft.getId(), draft.getContentHash(), "alice");
 
         assertThat(published.getStatus()).isEqualTo(VersionedAsset.Status.PUBLISHED);
+        // 数据库唯一坐标证明“同版本改内容”不可行；调用方必须创建显式后继版本。
         assertThatThrownBy(() -> registry.createDraft("t1", VersionedAsset.Type.PROMPT,
                 "coding", "1.0.0", null, "changed", null, "mallory"))
                 .isInstanceOf(DataIntegrityViolationException.class);
+        // 禁止 latest，确保历史运行与回滚始终解析到相同资产。
         assertThatThrownBy(() -> registry.resolve("t1", VersionedAsset.Type.PROMPT,
                 "coding", "latest", true)).isInstanceOf(IllegalArgumentException.class);
 
@@ -55,10 +63,12 @@ class AgentOpsGovernanceTest {
     void denyWinsAndConflictsFailClosed() {
         PolicyRule allow = rule("allow", 100, PolicyRule.Effect.ALLOW);
         PolicyRule deny = rule("deny", 1, PolicyRule.Effect.DENY);
+        // 即使 DENY 优先级更低也必须胜出，防止高优先级 ALLOW 绕过全局禁令。
         assertThat(DeterministicPolicyEngine.decide(Arrays.asList(allow, deny)).getOutcome())
                 .isEqualTo(PolicyDecision.Outcome.DENY);
 
         PolicyRule approval = rule("approval", 100, PolicyRule.Effect.REQUIRE_APPROVAL);
+        // 同优先级效果冲突不猜测配置意图，而是 fail-closed。
         assertThat(DeterministicPolicyEngine.decide(Arrays.asList(allow, approval)).getOutcome())
                 .isEqualTo(PolicyDecision.Outcome.DENY);
     }
@@ -68,6 +78,7 @@ class AgentOpsGovernanceTest {
         Map<String, Double> thresholds = metrics(0.8, 0.9, 10.0, 1000.0);
         List<String> reasons = EvaluationService.gateReasons(
                 thresholds, metrics(0.99, 0.99, 1.0, 10.0), false);
+        // 即使所有数值指标优秀，独立安全执行失败仍是不可抵消的发布否决。
         assertThat(reasons).contains("safety execution failed (veto)");
 
         VersionedAsset asset = registry.createDraft("t-gate", VersionedAsset.Type.VERIFIER,
@@ -89,6 +100,7 @@ class AgentOpsGovernanceTest {
         List<Map<String, Object>> events = audits.query("t-audit", null, null);
         assertThat(events).hasSize(2);
         assertThat(events.get(0)).containsKeys("EVENT_HASH", "PREVIOUS_HASH", "PAYLOAD_HASH");
+        // 最新事件必须引用前一事件；否则删除或改写中间事件无法沿链暴露。
         assertThat(events.get(0).get("PREVIOUS_HASH")).isNotNull();
     }
 

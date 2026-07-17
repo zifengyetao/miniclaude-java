@@ -2,7 +2,15 @@ package com.miniclaude.domain.durable;
 
 import java.time.Instant;
 
+/**
+ * 不可变的人工审批记录。
+ *
+ * <p>{@code actionHash} 把决定绑定到申请时的精确动作参数，避免审批后参数被替换；
+ * {@code sequence} 用于与事件、checkpoint 共同还原运行时间线，{@code version} 用于
+ * 防止并发决策覆盖。</p>
+ */
 public final class ApprovalRequest {
+    /** 审批生命周期；过期与拒绝都不授予执行权限。 */
     public enum Status { PENDING, APPROVED, REJECTED, EXPIRED }
 
     private final String id;

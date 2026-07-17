@@ -5,22 +5,29 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * 受监管场景的只读仿真端口。刻意不定义拒绝客户、封禁账户或 submit/place order 能力。
+ * 受监管场景的只读仿真端口。
+ *
+ * <p>风控端口只能读取评分、图谱和案例证据并验证建议，不能拒绝客户、封禁或冻结账户；
+ * 交易端口只能读取行情、研究和持仓，刻意不定义 submit/placeOrder。能力在接口层缺席，
+ * 比运行时用布尔开关禁用更难被误调用，也明确了 fake 与生产系统的隔离边界。</p>
  */
 public final class RegulatedScenarioPorts {
     private RegulatedScenarioPorts() {}
 
     public interface InvestigationEvidence {
+        /** 规则分、模型分和证据均携带来源或版本，供案例包审计。 */
         Score ruleScore(String subjectRef);
         Score modelScore(String subjectRef);
         List<Evidence> graphAndCaseEvidence(String subjectRef);
     }
 
     public interface InvestigationVerifier {
+        /** 独立检查建议及证据完整性，不负责作出客户不利决定。 */
         Verification verify(String recommendation, List<Evidence> evidence);
     }
 
     public interface TradingResearch {
+        /** 三项能力全部只读；本端口不存在任何订单提交或凭证能力。 */
         MarketSnapshot market(String instrument);
         String research(String instrument);
         PositionSnapshot position(String portfolioRef, String instrument);

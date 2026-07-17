@@ -31,6 +31,13 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 @Service
+/**
+ * 三个试点场景的应用编排器。
+ *
+ * <p>服务只通过场景端口调用受控 fake，并把每个决策写入持久化步骤和制品：
+ * Coding 在允许目录的独占 lease 中只生成补丁/PR 草稿；分析先过 SQL 只读 guard；
+ * 客服先脱敏且永不自动发送，敏感意图或低置信度必须转人工。</p>
+ */
 public class PilotScenarioService {
     private static final Pattern PII = Pattern.compile(
             "(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}|(?<!\\d)1[3-9]\\d{9}(?!\\d)");
@@ -77,6 +84,7 @@ public class PilotScenarioService {
             else if (ScenarioCatalog.ANALYST.equals(scenario)) executeAnalyst(tenant, run, input);
             else executeSupport(tenant, run, input);
         } catch (RuntimeException blocked) {
+            // why：任何校验或适配器异常都统一落为可审计的安全阻断，不能留下“运行中”假象。
             block(tenant, run, scenario, blocked);
         }
         return platform.getRun(run.getId());
@@ -116,6 +124,7 @@ public class PilotScenarioService {
         String branch = text(input, "branch", "feature/scenario-proposal");
         String command = text(input, "command", "");
         String combined = (branch + " " + command + " " + run.getGoal()).toLowerCase(Locale.ROOT);
+        // why：主分支和绕过审查/强推/生产部署会把“提案型”场景升级成不可逆外部动作。
         if ("main".equalsIgnoreCase(branch) || "master".equalsIgnoreCase(branch)) {
             throw new SecurityException("direct writes to main/master are forbidden");
         }
@@ -126,6 +135,7 @@ public class PilotScenarioService {
         }
         String workspace = required(input, "workspace");
         step(tenant, run, "explore", map("mode", "READ_ONLY"));
+        // 独占 lease 将并发运行隔离到不同工作区；关闭 lease 后立即释放占用。
         try (WorkspaceLease lease = leases.acquire(Paths.get(workspace), run.getId())) {
             String snapshot = coding.exploreReadOnly(lease.getWorkspace(), run.getGoal());
             step(tenant, run, "plan", map("snapshot", snapshot, "strategy", "PLAN_AND_EXECUTE"));
@@ -139,6 +149,7 @@ public class PilotScenarioService {
             ScenarioPorts.Review review = coding.independentReview(patch, verification);
             step(tenant, run, "review", map("approved", review.approved, "summary", review.summary));
             if (!review.approved) throw new IllegalStateException("independent review rejected");
+            // 终点只保存 patch 和 PR 草稿，明确不应用补丁、不创建外部 PR。
             artifacts.save(tenant, run.getId(), "PATCH_PROPOSAL", "change.patch", patch);
             artifacts.save(tenant, run.getId(), "PR_DRAFT", "pull-request-draft.json",
                     gson.toJson(map("title", run.getGoal(), "branch", branch, "status", "DRAFT",
@@ -151,6 +162,7 @@ public class PilotScenarioService {
     private void executeAnalyst(String tenant, AgentRun run, Map<String, Object> input) {
         String sql = required(input, "sql");
         int maxRows = number(input, "maxRows", 1000).intValue();
+        // guard 在成本估算前执行，避免危险 SQL 即使只送往估算端口也越过边界。
         SqlGuard.GuardedSql guarded = sqlGuard.validate(sql, maxRows);
         step(tenant, run, "sql-guard", map("readOnly", true, "limit", guarded.getLimit()));
         String metric = required(input, "metric");
@@ -160,6 +172,7 @@ public class PilotScenarioService {
                 "estimatedUsd", estimate.estimatedUsd));
         artifacts.save(tenant, run.getId(), "ANALYSIS_REQUEST", "analysis-request.json", gson.toJson(input));
         if (estimate.estimatedUsd.compareTo(approvalThreshold) > 0) {
+            // why：高成本查询先持久化请求并暂停，获批前不会调用 executeReadOnly。
             orchestrator.awaitApproval(tenant, run.getId(), "approval", "ANALYTICS_QUERY_COST",
                     gson.toJson(map("sqlHash", Integer.toHexString(sql.hashCode()),
                             "estimatedUsd", estimate.estimatedUsd)), Duration.ofMinutes(15),
@@ -172,11 +185,13 @@ public class PilotScenarioService {
     }
 
     private void finishAnalyst(String tenant, AgentRun run, Map<String, Object> input) {
+        // 恢复后再次校验，不信任等待审批期间保存的输入仍天然安全。
         SqlGuard.GuardedSql guarded = sqlGuard.validate(required(input, "sql"),
                 number(input, "maxRows", 1000).intValue());
         ScenarioPorts.QueryResult result = analytics.executeReadOnly(guarded.getSql(), guarded.getLimit());
         step(tenant, run, "query", map("rows", result.rows.size(), "adapter", "CONTROLLED_FAKE"));
         if (result.rows.size() > guarded.getLimit() || result.citations == null || result.citations.isEmpty()) {
+            // why：超行数或无引用结果不可形成报告，防止 fake/生产适配器违反端口契约。
             throw new IllegalStateException("result/citation verification failed");
         }
         step(tenant, run, "verify", map("citations", result.citations, "verified", true));
@@ -190,6 +205,7 @@ public class PilotScenarioService {
 
     private void executeSupport(String tenant, AgentRun run, Map<String, Object> input) {
         String message = required(input, "message");
+        // 原始 PII 不进入检索、步骤状态或制品；后续链路只使用 masked 文本。
         String masked = PII.matcher(message).replaceAll("[PII]");
         step(tenant, run, "pii-mask", map("masked", masked, "piiDetected", !masked.equals(message)));
         List<ScenarioPorts.Citation> citations = knowledge.search(masked);
@@ -198,6 +214,7 @@ public class PilotScenarioService {
         boolean sensitive = SENSITIVE.matcher(masked).find();
         step(tenant, run, "compliance", map("sensitiveIntent", sensitive, "autoSend", false));
         String draft = "回复草稿（未发送）：根据知识条目 " + citations.get(0).id + "，我们已记录您的问题。";
+        // 客服产物始终是未发送草稿；当前端口也没有 CRM 发送能力。
         artifacts.save(tenant, run.getId(), "REPLY_DRAFT", "customer-reply-draft.json",
                 gson.toJson(map("draft", draft, "citations", citations, "piiMaskedInput", masked,
                         "sent", false, "externalCrmConnected", false)));
@@ -205,6 +222,7 @@ public class PilotScenarioService {
         double confidence = number(input, "confidence", 0.90).doubleValue();
         step(tenant, run, "confidence", map("confidence", confidence, "threshold", 0.70));
         if (sensitive || confidence < 0.70) {
+            // why：高风险意图或低置信度不能依赖自动回复，必须暂停并交给人工处理。
             step(tenant, run, "handoff", map("required", true, "autoSend", false));
             orchestrator.awaitApproval(tenant, run.getId(), "handoff", "HUMAN_SUPPORT_HANDOFF",
                     gson.toJson(map("sensitive", sensitive, "confidence", confidence)),

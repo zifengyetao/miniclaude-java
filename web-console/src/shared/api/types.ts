@@ -1,3 +1,7 @@
+/**
+ * Web Console 与后端 JSON API 之间共享的 TypeScript 数据契约。
+ * 类型只提供编译期提示，不会校验运行时响应，也不能替代服务端输入验证与权限控制。
+ */
 export type ExecutionMode = 'CHAT' | 'PLAN_EXECUTE' | 'GOAL' | 'GRAPH'
 export type RunStatus = 'PENDING' | 'PLANNING' | 'WAITING_APPROVAL' | 'PAUSED' | 'RUNNING' | 'VERIFYING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT' | 'BUDGET_EXCEEDED' | 'STEP_LIMIT_EXCEEDED'
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'REGULATED'

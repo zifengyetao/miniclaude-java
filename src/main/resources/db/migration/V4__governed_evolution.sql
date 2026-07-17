@@ -1,3 +1,4 @@
+-- 受控进化记录从“经验”到“候选”再到“灰度/晋升”的证据链；任何表都不是直接改生产的捷径。
 CREATE TABLE experience_observation (
     id VARCHAR(36) PRIMARY KEY,
     tenant_id VARCHAR(120) NOT NULL,
@@ -17,6 +18,7 @@ CREATE TABLE evolution_candidate (
     id VARCHAR(36) PRIMARY KEY,
     tenant_id VARCHAR(120) NOT NULL,
     observation_id VARCHAR(36) NOT NULL,
+    -- L0-L3 表示自动化权限边界，不是质量评分；状态由应用层有限状态机条件更新。
     maturity_level VARCHAR(8) NOT NULL,
     status VARCHAR(32) NOT NULL,
     asset_type VARCHAR(32) NOT NULL,
@@ -32,6 +34,7 @@ CREATE TABLE evolution_candidate (
     risk_class VARCHAR(32) NOT NULL,
     expected_benefit TEXT NOT NULL,
     patch_json TEXT NOT NULL,
+    -- patch 在评测后、晋升前复算摘要；若中途被替换则晋升失败关闭。
     patch_hash VARCHAR(64) NOT NULL,
     proposer_id VARCHAR(200) NOT NULL,
     owner_id VARCHAR(200),
@@ -42,6 +45,7 @@ CREATE TABLE evolution_candidate (
     CONSTRAINT fk_candidate_observation FOREIGN KEY (observation_id) REFERENCES experience_observation(id),
     CONSTRAINT fk_candidate_parent FOREIGN KEY (parent_asset_id) REFERENCES versioned_asset(id),
     CONSTRAINT fk_candidate_promoted FOREIGN KEY (promoted_asset_id) REFERENCES versioned_asset(id),
+    -- 同租户相同差异不重复形成候选，减少重放同一变更绕过复核的空间。
     CONSTRAINT uk_candidate_patch UNIQUE (tenant_id, patch_hash)
 );
 CREATE INDEX idx_candidate_tenant_status ON evolution_candidate(tenant_id, status, created_at);
@@ -53,6 +57,7 @@ CREATE TABLE candidate_evaluation (
     evaluator_id VARCHAR(200) NOT NULL,
     training_set_ref VARCHAR(300) NOT NULL,
     regression_set_ref VARCHAR(300) NOT NULL,
+    -- 仅保存隔离 holdout 的引用/访问令牌摘要，不保存样本正文，防止生成器针对隐藏集过拟合。
     hidden_holdout_ref VARCHAR(300) NOT NULL,
     hidden_access_token_hash VARCHAR(64),
     suite_id VARCHAR(36) NOT NULL,
@@ -88,6 +93,7 @@ CREATE TABLE rollout (
     stage VARCHAR(32) NOT NULL,
     status VARCHAR(32) NOT NULL,
     traffic_percent INTEGER NOT NULL,
+    -- baseline 始终保留；rollback 撤销 target 而不覆盖/删除稳定父版本。
     baseline_asset_id VARCHAR(36) NOT NULL,
     target_asset_id VARCHAR(36),
     metrics_json TEXT NOT NULL,
@@ -108,6 +114,7 @@ CREATE TABLE anti_rot_finding (
     severity VARCHAR(32) NOT NULL,
     status VARCHAR(32) NOT NULL,
     evidence TEXT NOT NULL,
+    -- finding 是人工/治理候选的输入，不触发自动删除或改写，避免启发式误判破坏生产。
     recommendation TEXT NOT NULL,
     detected_at TIMESTAMP WITH TIME ZONE NOT NULL,
     resolved_at TIMESTAMP WITH TIME ZONE,

@@ -15,6 +15,12 @@ import org.springframework.web.bind.annotation.RestController;
 import javax.validation.Valid;
 import java.util.List;
 
+/**
+ * 数字员工定义的 REST 入站适配器。
+ *
+ * <p>负责 HTTP 路由、请求校验和状态码，不承载领域规则、鉴权或事务；这些职责分别位于
+ * 安全过滤器和 {@link AgentPlatformService}。响应当前直接使用不可变领域对象。
+ */
 @RestController
 @RequestMapping("/api/v1/platform/agents")
 public class PlatformAgentController {
@@ -35,6 +41,10 @@ public class PlatformAgentController {
         return platform.getAgent(id);
     }
 
+    /**
+     * 创建草稿定义。请求必须通过 Bean Validation；领域或持久化失败由统一异常处理器映射。
+     * 该端点非幂等，并发相同请求会创建不同定义。
+     */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public AgentDefinition create(@Valid @RequestBody CreateAgentDefinitionRequest request) {

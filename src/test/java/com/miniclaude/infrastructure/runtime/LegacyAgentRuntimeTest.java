@@ -18,6 +18,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 验证旧引擎适配器的结果转换、会话生命周期和失败关闭边界。
+ *
+ * <p>测试通过工厂替身避免真实模型调用，重点覆盖同会话复用、密钥检查和工作区隔离。
+ */
 class LegacyAgentRuntimeTest {
 
     @Test
@@ -49,6 +54,7 @@ class LegacyAgentRuntimeTest {
 
         AgentRuntimeResult first =
                 runtime.execute(new AgentRuntimeRequest(context, settings, "hello"));
+        // 第二轮使用同一边界标识，必须复用会话才能保持旧引擎的对话状态。
         runtime.execute(new AgentRuntimeRequest(context, settings, "again"));
 
         assertThat(first.getText()).isEqualTo("echo:hello");
@@ -67,6 +73,7 @@ class LegacyAgentRuntimeTest {
             throw new AssertionError("must not create");
         });
 
+        // 同时断言工厂未被调用，确保安全校验发生在任何外部资源创建之前。
         assertThatThrownBy(() -> runtime.execute(new AgentRuntimeRequest(
                 context(Paths.get("")), settings(""), "hello")))
                 .isInstanceOf(IllegalStateException.class)

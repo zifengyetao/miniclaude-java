@@ -1,3 +1,7 @@
+/**
+ * 数字员工页面负责查询 Agent 定义并提交新建草稿。
+ * 前端字段枚举和长度限制只用于交互，服务端仍须执行权限、风险级别和数据合法性校验。
+ */
 import { Bot, Plus, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { platformApi } from '../../shared/api/client'
@@ -14,6 +18,7 @@ export function EmployeesPage() {
   const [saving, setSaving] = useState(false)
   const [submitError, setSubmitError] = useState('')
 
+  /** 提交数字员工定义，成功后关闭表单并重新读取服务端列表。 */
   async function submit(event: FormEvent) {
     event.preventDefault()
     setSaving(true); setSubmitError('')

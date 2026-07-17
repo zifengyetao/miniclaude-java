@@ -27,6 +27,13 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * AgentOps 治理 HTTP 边界。
+ *
+ * <p>控制器只做协议映射，所有不可变版本、精确 pin、hash 校验、deny-first 和 release gate
+ * 约束均由应用/领域服务执行，避免某个入口漏掉安全检查。租户与操作者来自显式请求头并传入
+ * 审计链；调用方不能通过请求体覆盖这些边界身份。</p>
+ */
 @RestController
 @RequestMapping("/api/v1/governance")
 public class GovernanceController {
@@ -62,12 +69,14 @@ public class GovernanceController {
                                   @RequestParam VersionedAsset.Type type, @RequestParam String key,
                                   @RequestParam String version,
                                   @RequestParam(defaultValue = "false") boolean forRun) {
+        // 服务层强制精确版本并复算内容 hash；REST 层不提供 latest 的便利后门。
         return registry.resolve(tenant, type, key, version, forRun);
     }
 
     @PutMapping("/assets/{id}/publish")
     public VersionedAsset publish(@PathVariable String id, @RequestHeader("X-Actor-Id") String actor,
                                   @RequestBody HashRequest body) {
+        // 客户端提交其审批时看到的 hash；内容若在审批后变化，发布将失败而不是静默接受。
         return registry.publish(id, body.hash, actor);
     }
 
@@ -109,6 +118,7 @@ public class GovernanceController {
                                    @RequestHeader(value = "X-Run-Id", defaultValue = "policy-evaluation") String run,
                                    @RequestHeader(value = "X-Actor-Id", defaultValue = "anonymous") String actor,
                                    @RequestBody PolicyEvaluationRequest body) {
+        // 将 REST 身份和追踪字段封装进策略上下文，确保 deny/allow 决策可关联到审计事件。
         ExecutionContext context = new ExecutionContext(Paths.get("."), tenant, actor, run, trace);
         return policies.evaluate(new PolicyRequest(context, body.action, body.resource));
     }

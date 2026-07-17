@@ -72,6 +72,11 @@ public class ChatApplicationService {
         session.touch();
         sessionRepository.save(session);
 
+        /*
+         * 先冻结本轮配置快照，再构造显式 ExecutionContext。旧引擎曾依赖 JVM 全局
+         * user.dir；这里改为逐请求传递 workspace/tenant/session/run/trace，避免并发
+         * 会话相互污染，也让后续审计和分布式 Worker 能准确关联同一次执行。
+         */
         AgentSettings settings = defaultSettings.withSessionOverrides(
                 session.getModel(), command.getMaxTurns());
         ExecutionContext context = newExecutionContext(session.getId());
@@ -90,6 +95,13 @@ public class ChatApplicationService {
         sessionRepository.delete(sessionId);
     }
 
+    /**
+     * 为一次网关调用创建不可复用的执行上下文。
+     *
+     * <p>sessionId 负责多轮对话关联；runId 和 traceId 每次调用重新生成，分别用于
+     * 业务运行与可观测链路。当前 HTTP 兼容层使用默认租户，真正的身份接入后应由
+     * 已认证主体提供 tenant，而不能接受用户消息中的租户声明。
+     */
     private ExecutionContext newExecutionContext(String sessionId) {
         Path workspace = StringUtils.hasText(defaultSettings.getWorkingDirectory())
                 ? Paths.get(defaultSettings.getWorkingDirectory())

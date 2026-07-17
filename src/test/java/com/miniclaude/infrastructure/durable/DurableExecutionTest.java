@@ -18,6 +18,12 @@ import java.time.Duration;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 本地持久执行的集成契约测试。
+ *
+ * <p>使用真实 Spring 事务、Flyway 表结构和 JDBC 存储验证恢复、幂等、审批 fail-closed
+ * 以及预算终止；这些断言保护的是跨组件持久语义，而非单个方法的实现细节。</p>
+ */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:durable-test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1",
         "spring.datasource.driver-class-name=org.h2.Driver",
@@ -41,6 +47,7 @@ class DurableExecutionTest {
 
     @Test
     void resumesFromPersistedCheckpoint() {
+        // 先完成步骤并暂停，再恢复；checkpoint 必须独立于进程内控制流保留恢复位置。
         AgentRun run = create(new BigDecimal("10"));
         orchestrator.recordStep("tenant-a", run.getId(), "prepare", "{\"done\":true}",
                 BigDecimal.ZERO, "step-1");
@@ -54,6 +61,7 @@ class DurableExecutionTest {
 
     @Test
     void deduplicatesEventsAndTransitions() {
+        // 模拟客户端因响应丢失而重发同一命令，相同幂等键只能产生一条运行事实。
         AgentRun run = create(new BigDecimal("10"));
         orchestrator.pause("tenant-a", run.getId(), "same-pause");
         orchestrator.pause("tenant-a", run.getId(), "same-pause");
@@ -64,6 +72,7 @@ class DurableExecutionTest {
 
     @Test
     void approvalIsBoundToExactActionParametersAndFailsClosed() {
+        // 先用篡改后的参数尝试批准，验证哈希绑定拒绝授权；原参数随后仍可正常决定。
         AgentRun run = create(new BigDecimal("10"));
         ApprovalRequest approval = orchestrator.awaitApproval("tenant-a", run.getId(), "deploy",
                 "DEPLOY", "{\"environment\":\"prod\"}", Duration.ofMinutes(5), "wait-1");
@@ -82,6 +91,7 @@ class DurableExecutionTest {
 
     @Test
     void terminatesWhenCostBudgetIsExceeded() {
+        // 成本在步骤提交事务中累计；越界步骤被记账，同时运行进入不可继续的预算终态。
         AgentRun run = create(new BigDecimal("0.50"));
         AgentRun stopped = orchestrator.recordStep("tenant-a", run.getId(), "costly", "{}",
                 new BigDecimal("0.51"), "cost-1");

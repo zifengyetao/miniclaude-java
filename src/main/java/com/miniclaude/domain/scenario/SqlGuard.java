@@ -7,7 +7,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
-/** 不依赖具体数据库方言的 fail-closed SQL tokenizer/guard。 */
+/**
+ * 不依赖具体数据库方言的 fail-closed SQL 只读 guard。
+ *
+ * <p>它先按词法状态跳过字符串、引用标识符和注释，再要求查询以 SELECT/WITH 开始、
+ * 不含写入/DDL/外部访问能力，且必须使用字面量 LIMIT。该 guard 是纵深防御，不替代
+ * 数据库只读账号、网络隔离和真实适配器自身的权限控制。</p>
+ */
 public final class SqlGuard {
     private static final Set<String> FORBIDDEN = new HashSet<>(Arrays.asList(
             "insert", "update", "delete", "drop", "alter", "create", "merge", "call",
@@ -20,10 +26,12 @@ public final class SqlGuard {
         if (sql == null || sql.trim().isEmpty()) throw new IllegalArgumentException("sql required");
         if (maximumRows < 1) throw new IllegalArgumentException("maximumRows must be positive");
         List<String> tokens = tokenize(sql);
+        // why：入口关键字不在只读集合时立即拒绝，未知语法不能按“可能安全”放行。
         if (tokens.isEmpty() || (!"select".equals(tokens.get(0)) && !"with".equals(tokens.get(0)))) {
             throw new SecurityException("only SELECT statements are allowed");
         }
         for (String token : tokens) {
+            // why：非末尾分号代表可能拼接第二条语句，阻止只读查询后夹带写操作。
             if (";".equals(token)) throw new SecurityException("multiple statements are forbidden");
             if (FORBIDDEN.contains(token)) throw new SecurityException("forbidden SQL token: " + token);
             if (DANGEROUS_FUNCTIONS.contains(token)) {
@@ -32,6 +40,7 @@ public final class SqlGuard {
         }
         if (!tokens.contains("select")) throw new SecurityException("query must contain SELECT");
         int limitIndex = tokens.lastIndexOf("limit");
+        // why：强制调用方显式声明结果上界，避免全表结果造成数据外泄或资源失控。
         if (limitIndex < 0 || limitIndex + 1 >= tokens.size()) {
             throw new SecurityException("explicit LIMIT is required");
         }
@@ -39,6 +48,7 @@ public final class SqlGuard {
         try {
             requested = Integer.parseInt(tokens.get(limitIndex + 1));
         } catch (NumberFormatException invalid) {
+            // why：拒绝参数、表达式和子查询形式的 LIMIT，避免运行期上界不可判定。
             throw new SecurityException("LIMIT must be a literal integer");
         }
         if (requested < 1 || requested > maximumRows) {
@@ -48,6 +58,7 @@ public final class SqlGuard {
     }
 
     private List<String> tokenize(String sql) {
+        // 词法状态确保注释或字符串里的敏感单词不误报，同时防止注释绕过语句边界检查。
         List<String> tokens = new ArrayList<>();
         StringBuilder token = new StringBuilder();
         boolean single = false;
@@ -86,6 +97,7 @@ public final class SqlGuard {
                 if (c == ';' && !onlyWhitespaceAfter(sql, i + 1)) tokens.add(";");
             }
         }
+        // why：未闭合结构的真实解析含义不确定，安全边界必须 fail closed。
         if (single || quotedIdentifier || blockComment) throw new SecurityException("unterminated SQL literal/comment");
         flush(tokens, token);
         return tokens;

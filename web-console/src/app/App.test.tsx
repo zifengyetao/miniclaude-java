@@ -1,3 +1,4 @@
+/** 验证后端驱动的应用首页可渲染，并可通过外壳导航进入 Graph Studio。 */
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'

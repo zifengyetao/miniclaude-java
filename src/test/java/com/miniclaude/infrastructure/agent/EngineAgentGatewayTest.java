@@ -13,6 +13,11 @@ import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 验证聊天网关只做形态转换，并完整保留运行时安全上下文。
+ *
+ * <p>记录型运行时隔离具体引擎副作用，使测试聚焦适配器契约。
+ */
 class EngineAgentGatewayTest {
 
     @Test
@@ -25,6 +30,7 @@ class EngineAgentGatewayTest {
 
         ChatTurnResult result = gateway.chat(context, settings, "hello");
 
+        // 要求对象身份不变，防止适配层重建上下文时遗漏租户或追踪字段。
         assertThat(runtime.request.getContext()).isSameAs(context);
         assertThat(runtime.request.getSettings()).isSameAs(settings);
         assertThat(runtime.request.getInput()).isEqualTo("hello");

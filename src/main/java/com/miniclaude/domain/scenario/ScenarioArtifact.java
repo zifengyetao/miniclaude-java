@@ -3,6 +3,12 @@ package com.miniclaude.domain.scenario;
 import java.time.Instant;
 import java.util.List;
 
+/**
+ * 场景运行产生的不可变证据载体。
+ *
+ * <p>内容哈希用于把审批决定绑定到当时的提案或案例包，tenantId/runId 用于隔离查询；
+ * artifact 本身只记录草稿、报告和安全阻断证据，不代表任何外部系统动作已发生。</p>
+ */
 public final class ScenarioArtifact {
     private final String id;
     private final String tenantId;
@@ -20,6 +26,7 @@ public final class ScenarioArtifact {
     }
 
     public interface Repository {
+        /** 保存内容及其哈希，供后续审批、恢复和审计核对。 */
         ScenarioArtifact save(String tenantId, String runId, String type, String name, String content);
         List<ScenarioArtifact> findByRun(String tenantId, String runId);
     }

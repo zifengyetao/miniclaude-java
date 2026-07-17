@@ -1,3 +1,7 @@
+/**
+ * 平台工作台并行汇总数字员工、运行和治理资产，提供只读概览与导航入口。
+ * 指标是普通 API 返回的加载时快照，不代表 SSE 实时监控或安全审计结论。
+ */
 import { ArrowRight, Bot, CheckCircle2, Clock3, PlayCircle } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { governanceApi, platformApi } from '../shared/api/client'

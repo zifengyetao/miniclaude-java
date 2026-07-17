@@ -9,7 +9,11 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * 明确命名的确定性 fake：不连接交易所、OMS、风控、客户、图谱或案例生产系统。
+ * 受监管仿真域明确命名的确定性 fake。
+ *
+ * <p>固定返回带 fake 来源和版本的评分、图谱/案例证据、行情、研究及持仓，
+ * 不连接交易所、OMS、风控、客户或生产图谱系统。实现的接口本身没有拒绝客户、
+ * 冻结账户或 submit/placeOrder 方法，因此即使编排误用也无法发起真实受监管动作。</p>
  */
 @Component
 public final class DeterministicFakeRegulatedAdapters implements
@@ -41,6 +45,7 @@ public final class DeterministicFakeRegulatedAdapters implements
     @Override
     public RegulatedScenarioPorts.Verification verify(
             String recommendation, List<RegulatedScenarioPorts.Evidence> evidence) {
+        // fake 验证器只验证建议白名单和证据存在性，用于测试独立验证边界而非生产裁决。
         boolean passed = ("REVIEW".equals(recommendation) || "ESCALATE".equals(recommendation))
                 && evidence != null && !evidence.isEmpty();
         return new RegulatedScenarioPorts.Verification(passed,
@@ -50,6 +55,7 @@ public final class DeterministicFakeRegulatedAdapters implements
 
     @Override
     public RegulatedScenarioPorts.MarketSnapshot market(String instrument) {
+        // 固定时间和价格保证测试可复现；不得将其解释为实时市场数据。
         return new RegulatedScenarioPorts.MarketSnapshot(instrument, new BigDecimal("100.00"),
                 Instant.parse("2030-01-02T14:30:00Z"), "DETERMINISTIC_FAKE_MARKET_DATA");
     }

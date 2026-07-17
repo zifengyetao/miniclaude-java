@@ -7,7 +7,12 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
-/** 可版本化发布的数字员工定义。 */
+/**
+ * 可版本化发布的数字员工定义聚合。
+ *
+ * <p>本类保存身份、风险、演进等级和允许的执行模式，不负责发布状态迁移或持久化。
+ * 实例不可变；执行模式会被防御性复制，因而可作为跨层返回值安全共享。
+ */
 public final class AgentDefinition {
 
     public enum RiskLevel { LOW, MEDIUM, HIGH, REGULATED }
@@ -54,6 +59,12 @@ public final class AgentDefinition {
         this.updatedAt = Objects.requireNonNull(updatedAt, "updatedAt");
     }
 
+    /**
+     * 创建具有新标识和初始版本的草稿。
+     *
+     * <p>名称、描述、角色、等级及至少一个执行模式必须有效，否则构造过程会失败。
+     * 每次调用都会生成新的 UUID 和时间戳，因此该工厂方法并非幂等；并发调用彼此独立。
+     */
     public static AgentDefinition draft(
             String name,
             String description,

@@ -16,9 +16,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 
 /**
- * 平台第一阶段的最小 API 边界。
- * 配置 PLATFORM_API_KEY 后所有 /api 请求必须携带 X-Platform-Api-Key；
- * 未配置时只允许本机访问，避免开发默认配置暴露到网络。
+ * 平台 API 的最小入口认证边界。
+ *
+ * <p>配置 API 密钥后，所有 {@code /api/} 请求必须提供匹配的
+ * {@code X-Platform-Api-Key}；未配置时仅允许环回地址，以避免开发默认配置意外暴露。
+ * 本过滤器只做入口认证，不替代租户授权、业务权限或传输层加密。
  */
 @Component
 public class PlatformApiKeyFilter extends OncePerRequestFilter {
@@ -30,11 +32,18 @@ public class PlatformApiKeyFilter extends OncePerRequestFilter {
         this.configuredApiKey = configuredApiKey == null ? "" : configuredApiKey.trim();
     }
 
+    /** 仅过滤平台 API 路径；静态资源及非 API 端点留给其各自安全链处理。 */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         return !request.getRequestURI().startsWith("/api/");
     }
 
+    /**
+     * 在请求进入控制器前执行失败关闭认证。
+     *
+     * <p>请求与响应由 Servlet 容器提供。密钥不匹配、缺失，或无密钥模式下来源不是环回地址，
+     * 都直接返回 401 且不继续过滤链。方法不修改共享状态，可并发执行，也不产生可重试副作用。
+     */
     @Override
     protected void doFilterInternal(
             HttpServletRequest request,
@@ -42,11 +51,13 @@ public class PlatformApiKeyFilter extends OncePerRequestFilter {
             FilterChain filterChain) throws ServletException, IOException {
         if (StringUtils.hasText(configuredApiKey)) {
             String provided = request.getHeader("X-Platform-Api-Key");
+            // 使用常量时间字节比较，降低根据响应时间逐步猜测密钥的风险。
             if (!constantTimeEquals(configuredApiKey, provided)) {
                 unauthorized(response);
                 return;
             }
         } else if (!isLoopback(request.getRemoteAddr())) {
+            // 未配置密钥不是“关闭认证”，而是收紧到本机开发访问。
             unauthorized(response);
             return;
         }

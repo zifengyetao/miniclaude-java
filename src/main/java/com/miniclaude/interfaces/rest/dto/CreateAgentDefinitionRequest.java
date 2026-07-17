@@ -9,6 +9,12 @@ import javax.validation.constraints.NotNull;
 import javax.validation.constraints.Size;
 import java.util.Set;
 
+/**
+ * 创建数字员工草稿的 HTTP 请求 DTO。
+ *
+ * <p>本类只声明传输层必填和长度约束，字段组合及执行模式业务规则由领域对象和应用服务校验；
+ * 可变 setter 仅供 JSON 反序列化使用，不应作为领域模型跨层传递。
+ */
 public class CreateAgentDefinitionRequest {
 
     @NotBlank

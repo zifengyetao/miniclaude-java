@@ -11,7 +11,13 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.UUID;
 
-/** 在请求边界设置并清理低基数上下文；正文和敏感值不进入指标标签。 */
+/**
+ * 在 HTTP 请求边界设置并清理治理追踪上下文。
+ *
+ * <p>traceId、tenantId、runId 用于把策略、评测、审计和发布操作关联起来；请求正文和敏感值
+ * 不进入 MDC/指标标签，避免秘密泄漏与高基数指标爆炸。finally 清理是线程池安全要求：
+ * 若遗留 MDC，复用同一工作线程的下个租户可能继承错误上下文并污染日志取证。</p>
+ */
 @Component("governanceMdcFilter")
 public class RequestContextFilter extends OncePerRequestFilter {
     @Override
@@ -27,6 +33,7 @@ public class RequestContextFilter extends OncePerRequestFilter {
         try {
             chain.doFilter(request, response);
         } finally {
+            // 正常、异常和中断路径都必须清理，不能只依赖成功响应后的代码。
             MDC.remove("traceId");
             MDC.remove("tenantId");
             MDC.remove("runId");

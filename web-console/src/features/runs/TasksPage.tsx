@@ -1,3 +1,7 @@
+/**
+ * 任务中心负责创建持久化运行、提交暂停/恢复/取消命令，并展示事件与检查点证据。
+ * 当前页面通过普通 API 显式刷新，不消费 SSE；展示状态可能落后于服务端实际进度。
+ */
 import { Pause, Play, Plus, RotateCcw, Square, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { platformApi } from '../../shared/api/client'
@@ -14,10 +18,15 @@ export function TasksPage() {
   const [busy, setBusy] = useState('')
   const details = useAsync(async () => selected ? Promise.all([platformApi.runs.events(selected.id), platformApi.runs.checkpoints(selected.id)]) : [[], []], [selected?.id])
 
+  /** 创建运行并刷新列表；表单约束只改善输入体验，预算、步数和权限仍由服务端校验。 */
   async function create(event: FormEvent) {
     event.preventDefault(); setBusy('create')
     try { await platformApi.runs.create(form); setOpen(false); await runs.reload() } finally { setBusy('') }
   }
+  /**
+   * 提交运行控制命令并同步返回快照。
+   * busy 只抑制当前页面重复操作，跨标签页并发与状态迁移合法性必须由服务端处理。
+   */
   async function control(run: AgentRun, action: 'pause' | 'resume' | 'cancel') {
     setBusy(`${run.id}-${action}`)
     try { const updated = await platformApi.runs.control(run.id, action); setSelected(updated); await runs.reload() } finally { setBusy('') }
