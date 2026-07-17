@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: miniclaude-config
+  namespace: miniclaude
+data:
+  SERVER_ADDRESS: "0.0.0.0"
+  DATABASE_URL: "jdbc:postgresql://postgres:5432/miniclaude"
+  DATABASE_USERNAME: "miniclaude"
+  DATABASE_DRIVER: "org.postgresql.Driver"
+  PLATFORM_ORCHESTRATOR: "local"
+  PLATFORM_ALLOWED_WORKSPACES: "/workspace"
+  MINI_CLAUDE_MODEL: "kimi-k2.6"
+  MOONSHOT_BASE_URL: "https://api.moonshot.cn/v1"

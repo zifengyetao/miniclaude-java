@@ -1,0 +1,14 @@
+.git
+.github
+.claude
+.env
+.idea
+.vscode
+data
+deploy
+docs
+target
+test
+web-console
+*.iml
+*.log

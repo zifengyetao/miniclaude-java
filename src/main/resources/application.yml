@@ -1,0 +1,53 @@
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: 8080
+
+spring:
+  application:
+    name: miniclaude-java
+  datasource:
+    url: ${DATABASE_URL:jdbc:h2:file:./data/miniclaude;MODE=PostgreSQL;AUTO_SERVER=TRUE}
+    username: ${DATABASE_USERNAME:sa}
+    password: ${DATABASE_PASSWORD:}
+    driver-class-name: ${DATABASE_DRIVER:org.h2.Driver}
+  flyway:
+    enabled: true
+
+miniclaude:
+  model: kimi-k2.6
+  api-key: ${MOONSHOT_API_KEY:}
+  api-base: https://api.moonshot.cn/v1
+  permission-mode: default
+  thinking: false
+  max-turns: 32
+  # working-directory: /path/to/workspace
+
+platform:
+  # local（默认）不连接任何外部编排服务；设为 temporal 后才创建 Temporal 客户端。
+  orchestrator: ${PLATFORM_ORCHESTRATOR:local}
+  temporal:
+    target: ${TEMPORAL_TARGET:127.0.0.1:7233}
+    namespace: ${TEMPORAL_NAMESPACE:default}
+  sandbox:
+    # 逗号分隔的显式工作区白名单；空值表示全部拒绝。
+    allowed-workspaces: ${PLATFORM_ALLOWED_WORKSPACES:}
+  security:
+    api-key: ${PLATFORM_API_KEY:}
+  scenarios:
+    # 内置适配器均为受控 fake，不会连接 Git、数据库、CRM 或知识库。
+    # 生产接入需显式实现 ScenarioPorts 中对应 SPI 并替换 bean。
+    analytics:
+      approval-threshold-usd: ${ANALYTICS_APPROVAL_THRESHOLD_USD:5.00}
+
+logging:
+  level:
+    com.miniclaude: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized

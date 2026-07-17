@@ -1,0 +1,16 @@
+target/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.DS_Store
+*.class
+*.log
+.vscode/
+.env
+test/tmp/
+test/quote-test.js
+data/
+web-console/node_modules/
+web-console/dist/
