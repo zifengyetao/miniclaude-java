@@ -6,7 +6,7 @@
 ## 当前状态
 
 - 阶段：Week 1 — Harness 与 Agent Loop。
-- 状态：Shared Harness H1 完成、H2 Fake/Shadow 工具已接入；理论学习与口述答辩待进行。
+- 状态：Shared Harness H1 完成、H2 Fake/Shadow 工具已接入；96 题参考答案已建立，闭卷口述答辩待进行。
 - 最近更新：2026-07-20。
 - 简历：按用户要求暂不处理。
 - 可投入时间：工作日每天 6 小时，周末默认不安排；每周约 30 小时。
@@ -21,6 +21,7 @@
 - [x] 审查当前项目的面试含金量和架构硬伤。
 - [x] 制定八周、约 240 小时的冲刺路线。
 - [x] 建立 96 道资深 Agent 面试题库。
+- [x] 建立 96 题标准参考答案，覆盖原理、边界、故障恢复、指标与项目真实性映射。
 - [x] 将准备材料和进度机制落入仓库。
 
 ## 诊断记录
@@ -138,6 +139,8 @@
 - 完成 Shared Harness H1 与 H2 Fake/Shadow Tool：完成验证、参数/顺序 Guard、不可覆盖路由、
   服务端 SQL 上限、Context Workspace 绑定和稳定错误码。
 - 全量测试 63/63 通过；两轮 Reviewer 复核无残留 critical/high。
+- 完成 96 题标准参考答案，按 A～C、D～F、G～I 拆分，并从题库和文档索引建立入口；
+  参考答案仅用于校准，尚不代表闭卷掌握度提升。
 - 下一步唯一优先事项：为 Harness 接入版本化 Model Turn Adapter 与 Shadow Eval，
   再进入持久 Resume、Tool Receipt/Effect Ledger 和 UNKNOWN。
 

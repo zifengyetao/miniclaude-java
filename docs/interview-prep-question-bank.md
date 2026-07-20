@@ -16,6 +16,12 @@
 - **[伪代码]**：要求写接口、状态转换或核心算法。
 - **[反例]**：重点回答为什么不应使用某种 Agent 方案。
 
+标准参考答案（用于校准答题骨架，不建议逐字背诵）：
+
+- [A～C：Agent/Harness、RAG、Context/Memory（题 1～30）](./interview-prep-answers-a-c.md)
+- [D～F：Durable/Tool/MCP、Multi-Agent（题 31～62）](./interview-prep-answers-d-f.md)
+- [G～I：Java 流式 Runtime、Eval、Coding Harness（题 63～96）](./interview-prep-answers-g-i.md)
+
 ## A. Agent 与 Harness 基础（10）
 
 1. Agent Loop 与普通 LLM API 调用的本质区别是什么？

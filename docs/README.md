@@ -17,6 +17,9 @@
 
 - [八周路线](./interview-prep-roadmap.md)
 - [96 题题库](./interview-prep-question-bank.md)
+- 标准参考答案：[A～C（1～30）](./interview-prep-answers-a-c.md) ·
+  [D～F（31～62）](./interview-prep-answers-d-f.md) ·
+  [G～I（63～96）](./interview-prep-answers-g-i.md)
 - [项目审查](./interview-prep-project-review.md)
 - [岗位市场](./interview-prep-market.md)
 - [ADR-001 Harness-first Graph Runtime](./adr-001-harness-first-graph-runtime.md)
