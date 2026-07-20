@@ -8,30 +8,50 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * 不依赖具体数据库方言的 fail-closed SQL 只读 guard。
- *
- * <p>它先按词法状态跳过字符串、引用标识符和注释，再要求查询以 SELECT/WITH 开始、
- * 不含写入/DDL/外部访问能力，且必须使用字面量 LIMIT。该 guard 是纵深防御，不替代
- * 数据库只读账号、网络隔离和真实适配器自身的权限控制。</p>
+ * 不依赖具体数据库方言的 fail-closed SQL 只读 Guard（领域层纵深防御）。
+ * <p>
+ * <b>为何放在 domain：</b>数据分析场景的「只允许 SELECT + 字面量 LIMIT」是业务安全规则，
+ * 应在 domain 声明并在 application 调用，而非散落在 JDBC 适配器。
+ * <p>
+ * <b>不变量：</b>
+ * <ul>
+ *   <li>仅允许以 SELECT/WITH 开头的单语句；禁止多语句、DML/DDL、危险函数。</li>
+ *   <li>LIMIT 必须为字面量整数且 ≤ maximumRows。</li>
+ *   <li>未闭合字符串/注释 → SecurityException（fail-closed）。</li>
+ * </ul>
+ * <p>
+ * <b>边界：</b>不替代 DB 只读账号与网络隔离；{@link ScenarioPorts.AnalyticsData#executeReadOnly} 前应调用。
  */
 public final class SqlGuard {
+
+    /** 禁止出现的 SQL 关键字（小写 token 匹配）。 */
     private static final Set<String> FORBIDDEN = new HashSet<>(Arrays.asList(
             "insert", "update", "delete", "drop", "alter", "create", "merge", "call",
             "execute", "exec", "truncate", "grant", "revoke", "copy", "unload", "into"));
+    /** 禁止的危险函数 token。 */
     private static final Set<String> DANGEROUS_FUNCTIONS = new HashSet<>(Arrays.asList(
             "pg_sleep", "sleep", "benchmark", "load_file", "xp_cmdshell", "dblink",
             "read_csv", "read_parquet", "external_query"));
 
+    /**
+     * 校验 SQL 是否满足只读 guard 规则。
+     *
+     * @param sql          待执行 SQL
+     * @param maximumRows  允许的最大 LIMIT 值（平台上限）
+     * @return 规范化后的 sql 与解析出的 limit
+     * @throws IllegalArgumentException sql 空或 maximumRows &lt; 1
+     * @throws SecurityException        违反只读/单语句/LIMIT 规则
+     */
     public GuardedSql validate(String sql, int maximumRows) {
         if (sql == null || sql.trim().isEmpty()) throw new IllegalArgumentException("sql required");
         if (maximumRows < 1) throw new IllegalArgumentException("maximumRows must be positive");
         List<String> tokens = tokenize(sql);
-        // why：入口关键字不在只读集合时立即拒绝，未知语法不能按“可能安全”放行。
+        // 入口必须是 select 或 with（CTE），否则拒绝未知语法
         if (tokens.isEmpty() || (!"select".equals(tokens.get(0)) && !"with".equals(tokens.get(0)))) {
             throw new SecurityException("only SELECT statements are allowed");
         }
         for (String token : tokens) {
-            // why：非末尾分号代表可能拼接第二条语句，阻止只读查询后夹带写操作。
+            // 非末尾分号表示可能的多语句注入
             if (";".equals(token)) throw new SecurityException("multiple statements are forbidden");
             if (FORBIDDEN.contains(token)) throw new SecurityException("forbidden SQL token: " + token);
             if (DANGEROUS_FUNCTIONS.contains(token)) {
@@ -40,7 +60,7 @@ public final class SqlGuard {
         }
         if (!tokens.contains("select")) throw new SecurityException("query must contain SELECT");
         int limitIndex = tokens.lastIndexOf("limit");
-        // why：强制调用方显式声明结果上界，避免全表结果造成数据外泄或资源失控。
+        // 必须显式 LIMIT，防止全表扫描外泄
         if (limitIndex < 0 || limitIndex + 1 >= tokens.size()) {
             throw new SecurityException("explicit LIMIT is required");
         }
@@ -48,7 +68,7 @@ public final class SqlGuard {
         try {
             requested = Integer.parseInt(tokens.get(limitIndex + 1));
         } catch (NumberFormatException invalid) {
-            // why：拒绝参数、表达式和子查询形式的 LIMIT，避免运行期上界不可判定。
+            // 拒绝 LIMIT ? / 子查询形式，上界必须在静态可判定
             throw new SecurityException("LIMIT must be a literal integer");
         }
         if (requested < 1 || requested > maximumRows) {
@@ -57,12 +77,15 @@ public final class SqlGuard {
         return new GuardedSql(sql.trim(), requested);
     }
 
+    /**
+     * 词法分析：跳过字符串、双引号标识符、行/块注释内的 token。
+     * <p>输出小写 keyword token 列表，用于关键字黑名单匹配。
+     */
     private List<String> tokenize(String sql) {
-        // 词法状态确保注释或字符串里的敏感单词不误报，同时防止注释绕过语句边界检查。
         List<String> tokens = new ArrayList<>();
         StringBuilder token = new StringBuilder();
-        boolean single = false;
-        boolean quotedIdentifier = false;
+        boolean single = false;           // 单引号字符串
+        boolean quotedIdentifier = false; // 双引号标识符
         boolean lineComment = false;
         boolean blockComment = false;
         for (int i = 0; i < sql.length(); i++) {
@@ -84,7 +107,7 @@ public final class SqlGuard {
             }
             if (!quotedIdentifier && c == '\'') {
                 flush(tokens, token);
-                if (single && next == '\'') { i++; continue; }
+                if (single && next == '\'') { i++; continue; } // SQL 转义 ''
                 single = !single; continue;
             }
             if (!single && c == '"') {
@@ -94,20 +117,24 @@ public final class SqlGuard {
             if (Character.isLetterOrDigit(c) || c == '_') token.append(Character.toLowerCase(c));
             else {
                 flush(tokens, token);
+                // 仅当分号后还有非空白内容时才记录 ';' token（检测多语句）
                 if (c == ';' && !onlyWhitespaceAfter(sql, i + 1)) tokens.add(";");
             }
         }
-        // why：未闭合结构的真实解析含义不确定，安全边界必须 fail closed。
-        if (single || quotedIdentifier || blockComment) throw new SecurityException("unterminated SQL literal/comment");
+        if (single || quotedIdentifier || blockComment) {
+            throw new SecurityException("unterminated SQL literal/comment");
+        }
         flush(tokens, token);
         return tokens;
     }
 
+    /** 检查从 from 起是否全是空白（用于判断末尾分号）。 */
     private static boolean onlyWhitespaceAfter(String value, int from) {
         for (int i = from; i < value.length(); i++) if (!Character.isWhitespace(value.charAt(i))) return false;
         return true;
     }
 
+    /** 将当前 token 缓冲 flush 到列表。 */
     private static void flush(List<String> tokens, StringBuilder token) {
         if (token.length() > 0) {
             tokens.add(token.toString().toLowerCase(Locale.ROOT));
@@ -115,11 +142,14 @@ public final class SqlGuard {
         }
     }
 
+    /** 通过 guard 的 SQL 与解析出的 LIMIT 值。 */
     public static final class GuardedSql {
         private final String sql;
         private final int limit;
         GuardedSql(String sql, int limit) { this.sql = sql; this.limit = limit; }
+        /** @return trim 后的 SQL */
         public String getSql() { return sql; }
+        /** @return 字面量 LIMIT 整数 */
         public int getLimit() { return limit; }
     }
 }

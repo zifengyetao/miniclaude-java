@@ -5,43 +5,60 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * 受监管场景的只读仿真端口。
- *
- * <p>风控端口只能读取评分、图谱和案例证据并验证建议，不能拒绝客户、封禁或冻结账户；
- * 交易端口只能读取行情、研究和持仓，刻意不定义 submit/placeOrder。能力在接口层缺席，
- * 比运行时用布尔开关禁用更难被误调用，也明确了 fake 与生产系统的隔离边界。</p>
+ * 受监管场景（风控调查 / 交易辅助）的只读仿真 Outbound Port 命名空间。
+ * <p>
+ * <b>为何放在 domain：</b>通过<b>接口能力缺席</b>表达硬约束——无 submitOrder、无 freezeAccount，
+ * 比运行时 boolean 开关更难误调用。
+ * <p>
+ * <b>不变量：</b>所有端口只读或验证；客户不利处置必须在 application+审批链，不得在此端口实现。
+ * <p>
+ * <b>边界：</b>infrastructure Fake 行情/持仓/证据；application {@code RegulatedScenarioService} + {@link RegulatedSimulationPolicy}。
  */
 public final class RegulatedScenarioPorts {
     private RegulatedScenarioPorts() {}
 
+    /**
+     * 风控调查：读取评分与证据（无账户处置能力）。
+     */
     public interface InvestigationEvidence {
-        /** 规则分、模型分和证据均携带来源或版本，供案例包审计。 */
+        /** 规则引擎分，含 source/version 供审计。 */
         Score ruleScore(String subjectRef);
+        /** 模型分。 */
         Score modelScore(String subjectRef);
+        /** 关联图谱与案例证据列表。 */
         List<Evidence> graphAndCaseEvidence(String subjectRef);
     }
 
+    /**
+     * 调查结论独立验证（不作出封禁/拒绝客户决定）。
+     */
     public interface InvestigationVerifier {
-        /** 独立检查建议及证据完整性，不负责作出客户不利决定。 */
         Verification verify(String recommendation, List<Evidence> evidence);
     }
 
+    /**
+     * 交易研究：行情/研报/持仓只读（<b>故意无</b> placeOrder/submit）。
+     */
     public interface TradingResearch {
-        /** 三项能力全部只读；本端口不存在任何订单提交或凭证能力。 */
         MarketSnapshot market(String instrument);
         String research(String instrument);
         PositionSnapshot position(String portfolioRef, String instrument);
     }
 
+    /** 评分值对象。 */
     public static final class Score {
+        /** 来源系统/规则名。 */
         public final String source;
+        /** 分数值。 */
         public final BigDecimal value;
+        /** 规则/模型版本。 */
         public final String version;
         public Score(String source, BigDecimal value, String version) {
             this.source = source; this.value = value; this.version = version;
         }
     }
 
+    /** 证据条目（可哈希 digest 防篡改）。 */
     public static final class Evidence {
         public final String evidenceId;
         public final String source;
@@ -53,6 +70,7 @@ public final class RegulatedScenarioPorts {
         }
     }
 
+    /** 验证结果。 */
     public static final class Verification {
         public final boolean passed;
         public final String verifier;
@@ -62,6 +80,7 @@ public final class RegulatedScenarioPorts {
         }
     }
 
+    /** 行情快照（含时效 asOf）。 */
     public static final class MarketSnapshot {
         public final String instrument;
         public final BigDecimal price;
@@ -72,6 +91,7 @@ public final class RegulatedScenarioPorts {
         }
     }
 
+    /** 持仓快照（只读）。 */
     public static final class PositionSnapshot {
         public final String portfolioRef;
         public final String instrument;

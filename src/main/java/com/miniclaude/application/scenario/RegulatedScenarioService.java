@@ -64,8 +64,20 @@ public final class RegulatedScenarioService {
         this.trading = trading; this.audit = audit;
     }
 
+    /** @return 受监管场景 RolePack 不可变列表 */
     public List<RolePack> templates() { return catalog.list(); }
 
+    /**
+     * 启动受监管仿真 Run 并执行至四眼审批暂停点（或安全阻断）。
+     *
+     * @param tenant          租户
+     * @param scenario        {@link RegulatedScenarioCatalog#INVESTIGATION} 或 {@link RegulatedScenarioCatalog#TRADING}
+     * @param input           场景输入；须含 proposer、deadlineSeconds 等
+     * @param idempotencyKey  可选；非空且已见过则返回原 Run
+     * @return 运行结束时的 Run 快照（可能 FAILED 或等待审批）
+     * @throws SecurityException kill switch、策略违规、验证失败等
+     * @implNote 副作用：创建 Run、制品、审批请求、审计事件；无真实下单/不利决定
+     */
     public AgentRun start(String tenant, String scenario, Map<String, Object> input,
                           String idempotencyKey) {
         Instant deadline = deadline(input);
@@ -184,6 +196,11 @@ public final class RegulatedScenarioService {
         audit(tenant, run, "SYSTEM", "FOUR_EYES_REQUIRED", "PENDING");
     }
 
+    /**
+     * 提交四眼审批中的一条决定。
+     *
+     * @throws SecurityException 提案人自批、重复审批人、kill switch 等
+     */
     public ApprovalRequest decide(String tenant, String runId, String approvalId,
                                   String actor, String decision, String reason) {
         AgentRun run = status(tenant, runId);
@@ -209,6 +226,11 @@ public final class RegulatedScenarioService {
         return decided;
     }
 
+    /**
+     * 四眼审批满足后继续 Run，产出最终建议或 OMS 草稿并完成 Run。
+     *
+     * @throws SecurityException 审批人数/去重/提案人/建议集合校验失败
+     */
     public AgentRun continueRun(String tenant, String scenario, String runId) {
         catalog.get(scenario);
         AgentRun run = status(tenant, runId);
@@ -252,22 +274,35 @@ public final class RegulatedScenarioService {
         return status(tenant, runId);
     }
 
+    /**
+     * 查询 Run 并校验租户归属。
+     *
+     * @throws IllegalArgumentException 租户不匹配时伪装为 not found
+     */
     public AgentRun status(String tenant, String runId) {
         AgentRun run = platform.getRun(runId);
         if (!tenant.equals(run.getTenantId())) throw new IllegalArgumentException("run not found");
         return run;
     }
 
+    /** 列出 Run 全部场景制品（先校验租户）。 */
     public List<ScenarioArtifact> artifacts(String tenant, String runId) {
         status(tenant, runId);
         return artifacts.findByRun(tenant, runId);
     }
 
+    /** 列出 Run 四眼审批阶段全部审批请求。 */
     public List<ApprovalRequest> approvalStage(String tenant, String runId) {
         status(tenant, runId);
         return approvals.findApprovals(tenant, runId);
     }
 
+    /**
+     * 设置租户 kill switch。
+     *
+     * @return 设置后的 active 值
+     * @implNote 副作用：policy 状态 + 审计；激活时阻断新 Run 与 continue
+     */
     public boolean setKillSwitch(String tenant, boolean active, String actor) {
         // kill switch 按租户生效并审计操作者，可紧急阻止新运行和等待审批后的恢复。
         boolean value = policy.setKilled(tenant, active);
@@ -277,6 +312,7 @@ public final class RegulatedScenarioService {
         return value;
     }
 
+    /** @return 租户 kill switch 是否激活 */
     public boolean killSwitch(String tenant) { return policy.isKilled(tenant); }
 
     private void step(String tenant, AgentRun run, String node, Map<String, Object> state) {

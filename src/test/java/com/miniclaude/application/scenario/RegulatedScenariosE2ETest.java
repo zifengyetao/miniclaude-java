@@ -39,6 +39,7 @@ class RegulatedScenariosE2ETest {
     @Autowired RegulatedScenarioService scenarios;
     @Autowired MockMvc mvc;
 
+    /** REST 层 start/status/artifacts/approval-stage 与受监管场景编排一致。 */
     @Test
     void exposesUnifiedRestStartStatusArtifactsAndApprovalStage() throws Exception {
         String response = mvc.perform(post("/api/v1/scenarios/risk-investigation/start")
@@ -64,6 +65,7 @@ class RegulatedScenariosE2ETest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(2));
     }
 
+    /** 四眼审批 + PII 掩码后应 SUCCEEDED，产物不含明文邮箱/手机号。 */
     @Test
     void investigationProducesMaskedVerifiedSuggestionAfterFourEyes() {
         String tenant = "regulated-investigation";
@@ -89,6 +91,7 @@ class RegulatedScenariosE2ETest {
                 .containsAnyOf("\"recommendation\":\"REVIEW\"", "\"recommendation\":\"ESCALATE\"");
     }
 
+    /** requestedAction=BAN 属于自动不利决定，应 FAILED 并产出 SAFETY_BLOCK。 */
     @Test
     void blocksAutomaticAdverseDecision() {
         // why：BAN 属于自动客户不利决定，超出 REVIEW/ESCALATE 建议白名单。
@@ -101,6 +104,7 @@ class RegulatedScenariosE2ETest {
                 .contains("automatic reject/deny/ban/freeze decision is forbidden");
     }
 
+    /** 超 notional 限额与 stale market data 在审批前即 FAILED。 */
     @Test
     void deterministicRiskEngineBlocksLimitsAndStaleMarket() {
         // 硬限额和行情时效先于人工审批，不能靠审批覆盖确定性安全策略。
@@ -121,6 +125,7 @@ class RegulatedScenariosE2ETest {
                 .contains("market data is stale");
     }
 
+    /** 仅一名审批人批准时 continueRun 应 SecurityException（需两名非提案人）。 */
     @Test
     void oneApprovalIsInsufficient() {
         // 四眼不是“存在审批即可”，恢复点必须看到两个不同非提案人。
@@ -134,6 +139,7 @@ class RegulatedScenariosE2ETest {
                 .hasMessageContaining("two distinct non-proposer approvals");
     }
 
+    /** 提案人不得自批；同一 approver 不得批准两次。 */
     @Test
     void samePersonCannotApproveTwiceAndProposerCannotApprove() {
         // 同人重复批准和提案人自批分别验证人数与职责分离两项独立约束。
@@ -150,6 +156,7 @@ class RegulatedScenariosE2ETest {
                 .isInstanceOf(SecurityException.class).hasMessageContaining("different approvers");
     }
 
+    /** 租户 kill switch 开启时禁止 start 新运行。 */
     @Test
     void killSwitchStopsNewRuns() {
         // kill switch 是租户级紧急阻断，开启后连新运行创建都不允许。
@@ -161,6 +168,7 @@ class RegulatedScenariosE2ETest {
         scenarios.setKillSwitch(tenant, false, "security-officer");
     }
 
+    /** 双人批准后仅生成 OMS DRAFT；TradingResearch 端口反射无 submit/placeOrder。 */
     @Test
     void approvedTradeCreatesDraftWithoutAnySubmitCapability() {
         // why：两人批准只授权生成草稿；反射检查进一步证明端口根本没有提交方法。

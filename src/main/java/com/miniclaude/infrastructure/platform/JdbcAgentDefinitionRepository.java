@@ -16,17 +16,20 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 使用 JDBC 表 {@code agent_definition} 实现员工定义仓储。
+ * 使用 JDBC 表 {@code agent_definition} 实现 {@link AgentDefinitionRepository}。
  *
- * <p>适配器负责领域枚举、执行模式集合与关系字段的双向映射，不承担领域校验。
- * 写入采用先更新后插入的兼容式 upsert，原子性依赖调用方事务；并发首次写入同一标识
- * 可能触发数据库唯一键冲突。
+ * <p><b>Agent 定义</b>：数字员工模板——名称、角色、风险等级、进化级别 L0–L3、
+ * 允许的执行模式（CHAT / PLAN_EXECUTE / GRAPH）等。场景 RolePack 通过 name 关联定义。</p>
+ *
+ * <p><b>execution_modes 序列化</b>：库内以逗号分隔、字母序存储（{@link #formatModes}），
+ * 读取时解析为 {@link EnumSet}（{@link #parseModes}）。空串表示无模式——由领域层校验拒绝。</p>
  */
 @Repository
 public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository {
 
     private final JdbcTemplate jdbc;
 
+    /** 行映射：{@code execution_modes} 列经 {@link #parseModes} 转为枚举集合 */
     private final RowMapper<AgentDefinition> rowMapper = (rs, rowNum) -> new AgentDefinition(
             rs.getString("id"),
             rs.getString("name"),
@@ -93,15 +96,22 @@ public class JdbcAgentDefinitionRepository implements AgentDefinitionRepository 
         return result.stream().findFirst();
     }
 
+    /** 全部定义，按 updated_at 降序 */
     @Override
     public List<AgentDefinition> findAll() {
         return jdbc.query("SELECT * FROM agent_definition ORDER BY updated_at DESC", rowMapper);
     }
 
+    /** 将执行模式集合序列化为稳定排序的逗号串，便于 diff 与人工阅读 */
     private static String formatModes(Set<ExecutionMode> modes) {
         return modes.stream().map(Enum::name).sorted().collect(Collectors.joining(","));
     }
 
+    /**
+     * 从库内逗号串解析执行模式；非法枚举名会在 {@link ExecutionMode#valueOf} 抛异常。
+     *
+     * <p>空/null 输入返回空 {@link EnumSet}，由上层决定是否合法。</p>
+     */
     private static Set<ExecutionMode> parseModes(String value) {
         EnumSet<ExecutionMode> result = EnumSet.noneOf(ExecutionMode.class);
         if (value != null && !value.trim().isEmpty()) {

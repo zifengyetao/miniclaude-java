@@ -10,16 +10,33 @@ import com.miniclaude.domain.runtime.ExecutionContext;
 import org.springframework.stereotype.Component;
 
 /**
- * 聊天领域端口到 {@link AgentRuntime} 的基础设施适配器。
+ * 聊天领域端口（{@link AgentGateway}）到运行时端口（{@link AgentRuntime}）的基础设施适配器。
  *
- * <p>本类只完成请求和结果形态转换，不感知具体引擎、会话缓存或工作区实现，也不吞掉
- * 运行时异常。会话隔离、串行化和资源释放由运行时依据 {@link ExecutionContext} 保证。
+ * <p><b>六边形架构中的位置</b>：{@code application/chat} 只依赖 {@link AgentGateway} 接口；
+ * 本类是唯一把 Chat 链路接到 {@link LegacyAgentRuntime}（旧 {@code Agent} 引擎）的桥接层。
+ * 应用层因此不 import {@code infrastructure.engine} 包。</p>
+ *
+ * <p><b>职责边界（刻意保持「薄」）</b>：
+ * <ul>
+ *   <li>做：{@link AgentRuntimeRequest} / {@link ChatTurnResult} 的形态转换</li>
+ *   <li>不做：会话缓存、工作区校验、API Key 解析、工具/模型路由——全部委托运行时</li>
+ *   <li>不吞异常：引擎/网关失败原样向上传播，便于 REST 层返回 5xx 或业务错误</li>
+ * </ul></p>
+ *
+ * <p><b>为何不在这里重建 {@link ExecutionContext}</b>：上下文携带 tenantId、workspace、
+ * traceId 等安全边界；若在适配层丢弃或覆盖字段，下游策略与审计将无法关联请求。</p>
  */
 @Component
 public class EngineAgentGateway implements AgentGateway {
 
+    /** 注入的运行时实现，通常为 {@link com.miniclaude.infrastructure.runtime.LegacyAgentRuntime} */
     private final AgentRuntime agentRuntime;
 
+    /**
+     * 构造网关，绑定具体运行时 Bean。
+     *
+     * @param agentRuntime Spring 容器中的 {@link AgentRuntime} 唯一实现
+     */
     public EngineAgentGateway(AgentRuntime agentRuntime) {
         this.agentRuntime = agentRuntime;
     }

@@ -1,6 +1,11 @@
 /**
- * 数字员工页面负责查询 Agent 定义并提交新建草稿。
- * 前端字段枚举和长度限制只用于交互，服务端仍须执行权限、风险级别和数据合法性校验。
+ * 数字员工页面：查询 Agent 定义并提交新建草稿。
+ *
+ * 表单约束（仅 UX）：
+ * - maxLength 与 required 由 HTML5 校验，服务端仍有独立校验与权限检查
+ * - riskLevel / evolutionLevel / executionModes 枚举与后端 CreateAgentDefinitionRequest 对齐
+ *
+ * API：platformApi.agents.list（列表）、platformApi.agents.create（创建后 reload 列表）
  */
 import { Bot, Plus, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
@@ -9,6 +14,7 @@ import type { CreateAgentRequest, EvolutionLevel, ExecutionMode, RiskLevel } fro
 import { AsyncView } from '../../shared/components/AsyncView'
 import { useAsync } from '../../shared/hooks/useAsync'
 
+/** 创建表单初始值；关闭模态框或成功后 reset 到此状态。 */
 const initial: CreateAgentRequest = { name: '', description: '', roleName: '', riskLevel: 'LOW', evolutionLevel: 'L1', executionModes: ['PLAN_EXECUTE'] }
 
 export function EmployeesPage() {
@@ -18,7 +24,11 @@ export function EmployeesPage() {
   const [saving, setSaving] = useState(false)
   const [submitError, setSubmitError] = useState('')
 
-  /** 提交数字员工定义，成功后关闭表单并重新读取服务端列表。 */
+  /**
+   * 提交数字员工定义。
+   * 成功：关闭模态框、重置表单、reload 列表以展示服务端分配的 id/version/status。
+   * 失败：保留表单内容并展示 submitError，便于用户修正后重试。
+   */
   async function submit(event: FormEvent) {
     event.preventDefault()
     setSaving(true); setSubmitError('')

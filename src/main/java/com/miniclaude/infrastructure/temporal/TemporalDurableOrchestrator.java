@@ -16,17 +16,29 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Temporal 控制面适配器。Workflow 实现与 Worker 应由部署模块注册；缺失时操作会明确失败，
- * 不会静默回退到非持久执行。
+ * Temporal 持久编排适配器（{@link DurableOrchestrator} 的 Temporal 实现）。
  *
- * <p>该适配器只负责启动 Workflow 和发送控制 Signal；步骤、审批和终态持久化必须发生在
- * Activity 边界内，以利用 Temporal 的重试语义并保持 Workflow 代码确定性。尚未提供对应
- * Activity 路径的操作会 fail-closed，防止数据库状态与 Workflow 历史分叉。</p>
+ * <p><b>激活条件</b>：{@code platform.orchestrator=temporal}（非默认；默认见
+ * {@link LocalDurableOrchestrator}）。</p>
+ *
+ * <p><b>边界设计（为何部分方法 throw）</b>：
+ * Temporal 要求<b>Workflow 代码确定性</b>——随机数、时钟、DB 写入必须在 Activity 中。
+ * 若本类直接 {@code recordStep}/{@code complete}/{@code awaitApproval} 写 JDBC，
+ * 会绕过 Workflow 历史与 Activity 重试语义，导致「DB 状态与 Temporal 历史分叉」。
+ * 因此在 Activity 未接线前<b>fail-closed 抛异常</b>，而非静默写库。</p>
+ *
+ * <p><b>已实现能力</b>：{@link #create} 启动 Workflow、{@link #pause}/{@link #resume}/
+ * {@link #cancel} 发送 Signal。控制 Signal 经 stub 发送，不创建新 Workflow 实例。</p>
+ *
+ * <p><b>Worker 职责</b>：{@link DurableRunWorkflow} 实现与 {@link DurableRunWorkflow.Activities}
+ * 须在部署模块注册到 task queue {@code miniclaude-durable}——本类不包含 Worker 启动逻辑。</p>
  */
 @Service
 @ConditionalOnProperty(name = "platform.orchestrator", havingValue = "temporal")
 public class TemporalDurableOrchestrator implements DurableOrchestrator {
+    /** Temporal Workflow 客户端，由 {@link TemporalBoundaryConfiguration} 提供 */
     private final WorkflowClient client;
+    /** 运行聚合快照仓储，create 时先落库再启 Workflow */
     private final AgentRunRepository runs;
 
     public TemporalDurableOrchestrator(WorkflowClient client, AgentRunRepository runs) {
@@ -55,12 +67,15 @@ public class TemporalDurableOrchestrator implements DurableOrchestrator {
         return run;
     }
 
+    /** 向 Workflow 发送 pause Signal；返回 DB 中当前 Run 快照（非 Query 最新态） */
     @Override public AgentRun pause(String tenantId, String runId, String key) {
         workflow(runId).pause(); return required(tenantId, runId);
     }
+    /** 发送 resume Signal */
     @Override public AgentRun resume(String tenantId, String runId, String key) {
         workflow(runId).resume(); return required(tenantId, runId);
     }
+    /** 发送 cancel Signal，阻止后续 Activity 副作用 */
     @Override public AgentRun cancel(String tenantId, String runId, String key) {
         workflow(runId).cancel(); return required(tenantId, runId);
     }
@@ -83,10 +98,19 @@ public class TemporalDurableOrchestrator implements DurableOrchestrator {
         throw new IllegalStateException("failure must be recorded by a Temporal Activity");
     }
 
+    /**
+     * 获取已存在 Workflow 的 stub（仅发 Signal / Query，不 start）。
+     *
+     * @param runId 业务 Run id；WorkflowId 约定为 {@code run-{runId}}
+     */
     private DurableRunWorkflow workflow(String runId) {
         // 已知 Workflow ID 的 stub 只发送 Signal，不会创建新的 Workflow 实例。
         return client.newWorkflowStub(DurableRunWorkflow.class, "run-" + runId);
     }
+
+    /**
+     * 加载 Run 并校验租户；跨租户访问统一报 not found（防枚举）。
+     */
     private AgentRun required(String tenantId, String runId) {
         AgentRun run = runs.findById(runId)
                 .orElseThrow(() -> new IllegalArgumentException("run not found"));

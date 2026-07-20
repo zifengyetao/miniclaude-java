@@ -3,9 +3,17 @@ package com.miniclaude.infrastructure.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * 外部化配置项（前缀 {@code miniclaude.*}）。
- * <p>
- * 对应 application.yml / 环境变量，供基础设施层注入领域默认参数。
+ * Mini Claude 平台外部化配置项（Spring Boot {@code @ConfigurationProperties}）。
+ *
+ * <p><b>绑定前缀</b>：{@code miniclaude.*}，可在 {@code application.yml}、
+ * {@code application-{profile}.yml} 或环境变量（{@code MINICLAUDE_MODEL} 等）中设置。</p>
+ *
+ * <p><b>消费方</b>：{@link DomainConfig#agentSettings(MiniClaudeProperties)} 将其转为
+ * 领域 {@link com.miniclaude.domain.agent.AgentSettings}；运行时与工作区安全另有
+ * {@code platform.*} 前缀配置（见 {@link com.miniclaude.infrastructure.runtime.LocalWorkspaceSecurity}）。</p>
+ *
+ * <p><b>与 docs 硬约束的关系</b>：本类只承载配置字段，不执行校验；API Key 为空时
+ * {@link com.miniclaude.infrastructure.runtime.LegacyAgentRuntime} 会在执行前 fail-closed。</p>
  */
 @ConfigurationProperties(prefix = "miniclaude")
 public class MiniClaudeProperties {

@@ -25,12 +25,14 @@ class PlatformApiSecurityTest {
     @Autowired
     private MockMvc mockMvc;
 
+    /** 未携带 X-Platform-Api-Key 时须 401；证明过滤器在 Controller 之前 fail-closed。 */
     @Test
     void rejectsMissingApiKey() throws Exception {
         mockMvc.perform(get("/api/v1/platform/agents"))
                 .andExpect(status().isUnauthorized());
     }
 
+    /** 与 spring 配置 platform.security.api-key 一致的请求头应通过并返回 200。 */
     @Test
     void acceptsConfiguredApiKey() throws Exception {
         mockMvc.perform(get("/api/v1/platform/agents")

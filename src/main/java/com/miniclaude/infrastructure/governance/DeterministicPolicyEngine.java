@@ -17,11 +17,22 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * 本地、确定性、deny-first 策略引擎；无任何外部网络调用。
+ * 本地、确定性、<b>deny-first</b> 策略引擎（{@link PolicyEngine} JDBC 实现）。
  *
- * <p>相同租户规则与请求必得相同决策，外部服务超时不会改变授权语义。安全优先级为：
- * 任意 DENY ＞ 同优先级冲突时 DENY ＞ REQUIRE_APPROVAL ＞ ALLOW；没有匹配规则也 DENY。
- * 因此低优先级拒绝不会被高优先级允许覆盖，这是刻意的全局否决语义。</p>
+ * <p><b>为何不用 OPA/外部 PDP</b>（{@code docs/architecture.md}）：
+ * 默认拓扑不依赖外部策略服务；本引擎在 JVM 内完成 tenant 规则匹配，避免网络超时
+ * 导致「超时即允许」的灾难性语义。</p>
+ *
+ * <p><b>决策优先级（刻意严格）</b>：
+ * <ol>
+ *   <li>无匹配规则 → DENY（fail-closed，防止配置遗漏扩大权限）</li>
+ *   <li>任意 DENY 规则命中 → DENY（deny-first，低优先级 ALLOW 不能覆盖高优先级 DENY）</li>
+ *   <li>最高 priority 层 effect 冲突 → DENY（暴露策略配置错误）</li>
+ *   <li>存在 REQUIRE_APPROVAL → 要求人工审批</li>
+ *   <li>否则 ALLOW</li>
+ * </ol></p>
+ *
+ * <p>每次 {@link #evaluate} 写审计日志并递增 Micrometer 计数器 {@code agentops.policy.decisions}。</p>
  */
 @Service
 public class DeterministicPolicyEngine implements PolicyEngine {
@@ -33,6 +44,11 @@ public class DeterministicPolicyEngine implements PolicyEngine {
         this.jdbc = jdbc; this.audit = audit; this.meters = meters;
     }
 
+    /**
+     * 管理 API：向 {@code policy_rule} 表插入一条启用规则。
+     *
+     * <p>不做重复 key 检测——由 DB 唯一约束或上层管理流程保证。</p>
+     */
     public PolicyRule addRule(String tenant, String key, String version, String scope,
                               String actionPattern, String resourcePattern, int priority,
                               PolicyRule.Effect effect) {
@@ -70,6 +86,13 @@ public class DeterministicPolicyEngine implements PolicyEngine {
         return decision;
     }
 
+    /**
+     * 纯函数决策核心：给定已过滤、已排序的规则列表产出 {@link PolicyDecision}。
+     *
+     * <p>供单元测试直接调用，避免依赖 JDBC。</p>
+     *
+     * @param rules 非 null；通常已按 priority 降序
+     */
     public static PolicyDecision decide(List<PolicyRule> rules) {
         // 默认拒绝：配置缺失、规则未部署或模式不匹配都不能意外扩大权限。
         if (rules.isEmpty()) return PolicyDecision.deny("no matching allow rule (fail-closed)");
@@ -88,6 +111,12 @@ public class DeterministicPolicyEngine implements PolicyEngine {
         return PolicyDecision.allow("matching allow rule");
     }
 
+    /**
+     * 简单 glob 风格匹配：{@code *} 匹配任意子串；其余字符按字面量（经 quote 转义）。
+     *
+     * @param pattern 规则中的 action/resource 模式
+     * @param value   请求中的实际 action/resource
+     */
     private static boolean match(String pattern, String value) {
         if ("*".equals(pattern)) return true;
         String regex = java.util.regex.Pattern.quote(pattern).replace("*", "\\E.*\\Q");

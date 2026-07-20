@@ -79,11 +79,14 @@ class ApiClient {
 
 export const api = new ApiClient()
 
+/** 平台 Run/Agent/Graph 相关 REST 门面；路径前缀 /platform。 */
 export const platformApi = {
+  /** Agent 注册表：list 只读，create 需服务端写权限。 */
   agents: {
     list: () => api.get<AgentDefinition[]>('/platform/agents'),
     create: (body: CreateAgentRequest) => api.post<AgentDefinition>('/platform/agents', body),
   },
+  /** 持久化 Run 生命周期：events/checkpoints 为 append-only 审计证据。 */
   runs: {
     list: () => api.get<AgentRun[]>('/platform/runs'),
     get: (id: string) => api.get<AgentRun>(`/platform/runs/${id}`),
@@ -100,12 +103,14 @@ export const platformApi = {
         decision, actor: credentials.actorId, reason, actionParameters,
       }),
   },
+  /** Graph 编译期校验；不触发实际执行。 */
   graphs: {
     /** 请求服务端执行权威 Graph 校验；编辑器内 JSON 解析仅是输入预检查。 */
     validate: (body: GraphRequest) => api.post<GraphValidationResult>('/platform/graphs/validate', body),
   },
 }
 
+/** Chat 会话与单轮对话；无流式 endpoint。 */
 export const chatApi = {
   sessions: () => api.get<Session[]>('/sessions'),
   createSession: (model?: string) => api.post<Session>('/sessions', model ? { model } : {}),
@@ -113,6 +118,7 @@ export const chatApi = {
     api.post<ChatResponse>('/chat', { message, sessionId: sessionId || undefined, model: model || undefined }),
 }
 
+/** 试点/Coding 场景运行时：templates + start/status/artifacts/continue。 */
 export const scenarioApi = {
   templates: () => api.get<RolePack[]>('/scenarios/templates'),
   start: (scenario: string, input: Record<string, unknown>) => api.post<AgentRun>(`/scenarios/${scenario}/start`, input),
@@ -121,6 +127,7 @@ export const scenarioApi = {
   continue: (scenario: string, runId: string) => api.post<AgentRun>(`/scenarios/${scenario}/runs/${runId}/continue`),
 }
 
+/** 治理域：版本化资产、manifest、策略、评测、审计；写操作均须服务端授权。 */
 export const governanceApi = {
   assets: () => api.get<VersionedAsset[]>('/governance/assets'),
   createAsset: (body: Pick<VersionedAsset, 'type' | 'key' | 'version' | 'content'> & { parentId?: string; signature?: string }) =>
@@ -145,6 +152,7 @@ export const governanceApi = {
   releaseGate: (id: string) => api.get<EvaluationRecord>(`/governance/release-gates/${id}`),
 }
 
+/** 受治理进化：观测、候选、anti-rot；action 推进状态机而非直接改生产资产。 */
 export const evolutionApi = {
   observations: () => api.get<EvolutionObservation[]>('/governance/evolution/observations'),
   candidates: () => api.get<EvolutionCandidate[]>('/governance/evolution/candidates'),

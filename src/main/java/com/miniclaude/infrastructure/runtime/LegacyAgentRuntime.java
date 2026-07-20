@@ -21,25 +21,40 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 旧版集中式 {@link Agent} 到新运行时端口的隔离适配器。
+ * 旧版集中式 {@link Agent} 引擎到 {@link AgentRuntime} 端口的隔离适配器。
  *
- * <p>旧引擎仍依赖进程工作目录，因此仅允许与进程目录相同的显式 workspace；
- * 在引擎完成工作区隔离前，其他目录一律拒绝，且不会修改 {@code user.dir}。
- * 适配器按工作区、租户和会话缓存旧引擎实例；同一会话串行执行，不同会话可并发。
+ * <p><b>历史背景</b>：{@code infrastructure/engine} 最初为 CLI 单进程设计，全局
+ * {@code user.dir} 即工作区。HTTP 多租户模式下若允许多 workspace，旧引擎会互相
+ * 污染 cwd——因此在引擎完成隔离前，<b>强制 workspace == 进程工作目录</b>。</p>
+ *
+ * <p><b>会话模型</b>：{@code (workspace, tenantId, sessionId)} 三元组键缓存
+ * {@link LegacyAgentSession}；同键 {@link #execute} 通过 {@code synchronized(session)}
+ * 串行，不同键可并发。{@link #close} 移除并释放引擎资源。</p>
+ *
+ * <p><b>HTTP 安全加固</b>：
+ * <ul>
+ *   <li>{@link #validate} 要求 API Key 非空</li>
+ *   <li>{@code confirmFn} 恒 false——无交互式终端，高风险工具确认一律拒绝</li>
+ *   <li>工作区用 {@code toRealPath()} 防 {@code ..} / 符号链接绕过</li>
+ * </ul></p>
  */
 @Component
 public class LegacyAgentRuntime implements AgentRuntime {
 
     private static final Logger log = LoggerFactory.getLogger(LegacyAgentRuntime.class);
 
+    /** 活跃会话表：键为租户+工作区+会话，值为旧引擎包装 */
     private final ConcurrentHashMap<SessionKey, LegacyAgentSession> sessions =
             new ConcurrentHashMap<>();
+    /** 可测试的 Agent 工厂；生产默认为 {@link #createAgentSession} */
     private final LegacyAgentFactory agentFactory;
 
+    /** 生产构造：使用默认工厂创建 {@link Agent} 实例 */
     public LegacyAgentRuntime() {
         this(LegacyAgentRuntime::createAgentSession);
     }
 
+    /** 包可见构造：注入自定义工厂供单元测试 mock 引擎 */
     LegacyAgentRuntime(LegacyAgentFactory agentFactory) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
     }
@@ -112,6 +127,12 @@ public class LegacyAgentRuntime implements AgentRuntime {
         }
     }
 
+    /**
+     * 根据 {@link AgentSettings} 构建旧引擎会话。
+     *
+     * <p>HTTP 模式下 {@code confirmFn} 恒返回 false：任何需用户确认的写操作
+     * 在引擎层直接失败，与「建议型自治、高风险须审批」的平台原则一致。</p>
+     */
     private static LegacyAgentSession createAgentSession(AgentSettings settings) {
         Agent.Builder builder = Agent.builder()
                 .permissionMode(settings.getPermissionMode())
@@ -187,12 +208,19 @@ public class LegacyAgentRuntime implements AgentRuntime {
         LegacyAgentSession create(AgentSettings settings);
     }
 
+    /** 旧引擎会话的最小包装：一轮 run + close */
     interface LegacyAgentSession {
         Map<String, Object> runOnce(String input);
 
         void close();
     }
 
+    /**
+     * 会话缓存键：工作区 + 租户 + sessionId。
+     *
+     * <p>三者共同隔离——同 tenant 不同 session 不共享引擎对话状态；
+     * workspace 参与键是为将来多工作区引擎预留。</p>
+     */
     private static final class SessionKey {
         private final Path workspace;
         private final String tenantId;

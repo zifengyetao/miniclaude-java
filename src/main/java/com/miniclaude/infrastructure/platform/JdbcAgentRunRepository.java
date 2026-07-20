@@ -12,16 +12,25 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 使用 JDBC 表 {@code agent_run} 实现运行快照仓储。
+ * 使用 JDBC 表 {@code agent_run} 实现 {@link AgentRunRepository}。
  *
- * <p>本类只映射和保存快照，不执行状态机或调度。保存采用先更新后插入，事务原子性依赖
- * 上层；虽然持久化了版本字段，当前 SQL 并未用它进行乐观锁条件判断。
+ * <p><b>数据含义</b>：{@link AgentRun} 是数字员工/场景 Run 的<b>聚合根快照</b>——
+ * 状态、步数、成本、超时等当前视图；完整历史由 {@code run_event} / {@code run_checkpoint}
+ * 表承载（见 {@link JdbcDurableStore}）。</p>
+ *
+ * <p><b>Upsert 策略</b>：先 UPDATE 后 INSERT（非 MERGE），兼容 H2/PostgreSQL 且实现简单。
+ * 事务原子性依赖调用方 {@code @Transactional}；本方法自身不开启事务。</p>
+ *
+ * <p><b>并发 caveat</b>：虽持久化 {@code version} 字段，但 UPDATE SQL 未带
+ * {@code WHERE version=?} 乐观锁——并发写为「最后写入生效」。乐观锁在
+ * {@link LocalDurableOrchestrator} 层 enforced。</p>
  */
 @Repository
 public class JdbcAgentRunRepository implements AgentRunRepository {
 
     private final JdbcTemplate jdbc;
 
+    /** ResultSet → {@link AgentRun} 行映射；枚举字段按 name() 存取 */
     private final RowMapper<AgentRun> rowMapper = (rs, rowNum) -> new AgentRun(
             rs.getString("id"),
             rs.getString("agent_id"),
@@ -87,6 +96,7 @@ public class JdbcAgentRunRepository implements AgentRunRepository {
         return run;
     }
 
+    /** 按主键 id 查询；不存在返回 {@link Optional#empty()} */
     @Override
     public Optional<AgentRun> findById(String id) {
         List<AgentRun> result = jdbc.query(
@@ -96,6 +106,7 @@ public class JdbcAgentRunRepository implements AgentRunRepository {
         return result.stream().findFirst();
     }
 
+    /** 全表列表，按创建时间降序（工作台「最近运行」视图） */
     @Override
     public List<AgentRun> findAll() {
         return jdbc.query("SELECT * FROM agent_run ORDER BY created_at DESC", rowMapper);

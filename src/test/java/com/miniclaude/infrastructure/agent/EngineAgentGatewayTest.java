@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class EngineAgentGatewayTest {
 
+    /** chat 应透传 ExecutionContext/AgentSettings 引用并映射 ChatTurnResult 字段。 */
     @Test
     void delegatesThroughRuntimePortWithUnchangedContext() {
         RecordingRuntime runtime = new RecordingRuntime();

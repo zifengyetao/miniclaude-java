@@ -45,6 +45,7 @@ class DurableExecutionTest {
                 .map(AgentDefinition::getId).findFirst().orElseThrow(AssertionError::new);
     }
 
+    /** pause 后 resume 应恢复 RUNNING，且 latest checkpoint 指向 prepare 步骤。 */
     @Test
     void resumesFromPersistedCheckpoint() {
         // 先完成步骤并暂停，再恢复；checkpoint 必须独立于进程内控制流保留恢复位置。
@@ -59,6 +60,7 @@ class DurableExecutionTest {
                 .extracting(cp -> cp.getStepId()).isEqualTo("prepare");
     }
 
+    /** 相同 idempotencyKey 重复 pause 只应写入一条 RUN 事件。 */
     @Test
     void deduplicatesEventsAndTransitions() {
         // 模拟客户端因响应丢失而重发同一命令，相同幂等键只能产生一条运行事实。
@@ -70,6 +72,7 @@ class DurableExecutionTest {
                 .filter(e -> e.getIdempotencyKey().equals("same-pause"))).hasSize(1);
     }
 
+    /** 批准时 actionParameters 与 await 时不一致应拒绝；原参数批准后可 resume。 */
     @Test
     void approvalIsBoundToExactActionParametersAndFailsClosed() {
         // 先用篡改后的参数尝试批准，验证哈希绑定拒绝授权；原参数随后仍可正常决定。
@@ -89,6 +92,7 @@ class DurableExecutionTest {
                 .isEqualTo(AgentRun.Status.RUNNING);
     }
 
+    /** 单步 cost 超过 maxCostUsd 预算时运行应进入 BUDGET_EXCEEDED 终态。 */
     @Test
     void terminatesWhenCostBudgetIsExceeded() {
         // 成本在步骤提交事务中累计；越界步骤被记账，同时运行进入不可继续的预算终态。

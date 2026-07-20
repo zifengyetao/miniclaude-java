@@ -16,6 +16,7 @@ class GraphValidatorTest {
 
     private final GraphValidator validator = new GraphValidator();
 
+    /** 含 POLICY/TOOL/VERIFIER/TERMINAL 的线性受治理图应无 errors。 */
     @Test
     void acceptsGovernedLinearGraph() {
         GraphSpec spec = new GraphSpec(
@@ -39,6 +40,7 @@ class GraphValidatorTest {
         assertThat(result.getErrors()).isEmpty();
     }
 
+    /** 无 maxIterations 的环与 unreachable 节点应同时出现在 errors 列表。 */
     @Test
     void rejectsUnboundedCycleAndUnreachableNode() {
         GraphSpec spec = new GraphSpec(

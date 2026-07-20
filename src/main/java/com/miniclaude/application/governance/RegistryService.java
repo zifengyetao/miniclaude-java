@@ -105,6 +105,11 @@ public class RegistryService {
         return getById(id);
     }
 
+    /**
+     * 解析精确版本的 PUBLISHED 资产并复算 content hash。
+     *
+     * @param forRun 运行期解析标志；仍禁止 latest/通配符
+     */
     public VersionedAsset resolve(String tenant, VersionedAsset.Type type, String key,
                                   String version, boolean forRun) {
         // 运行期也禁止“latest”；否则同一发布清单在不同时间可能解析到不同内容，无法复现与回滚。
@@ -120,11 +125,13 @@ public class RegistryService {
         return asset;
     }
 
+    /** @return 租户全部资产（各状态），按创建时间降序 */
     public List<VersionedAsset> list(String tenant) {
         return jdbc.query("SELECT * FROM versioned_asset WHERE tenant_id=? ORDER BY created_at DESC",
                 mapper, tenant);
     }
 
+    /** @throws IllegalArgumentException 资产不存在 */
     public VersionedAsset getById(String id) {
         List<VersionedAsset> rows = jdbc.query("SELECT * FROM versioned_asset WHERE id=?", mapper, id);
         if (rows.isEmpty()) throw new IllegalArgumentException("asset not found");

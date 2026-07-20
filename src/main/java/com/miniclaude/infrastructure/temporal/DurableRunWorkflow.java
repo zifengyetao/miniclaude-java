@@ -7,11 +7,18 @@ import io.temporal.workflow.WorkflowInterface;
 import io.temporal.workflow.WorkflowMethod;
 
 /**
- * Temporal 持久运行的 Workflow 边界契约。
+ * Temporal 持久 Run 的 Workflow 边界契约（SDK 接口定义，无实现体）。
  *
- * <p>Workflow 负责可重放的控制流，数据库副作用必须经 {@link Activities} 执行；
- * 领域与应用层只依赖 {@code DurableOrchestrator}，从而不传播 Temporal SDK 类型。
- * Signal 表达异步控制意图，Query 只读取快照，不应改变 Workflow 状态。</p>
+ * <p><b>分层目的</b>：领域/应用只依赖 {@link com.miniclaude.domain.durable.DurableOrchestrator}，
+ * 不 import Temporal 类型——本接口是 infrastructure 与 Temporal SDK 之间的<b>防腐层</b>。</p>
+ *
+ * <p><b>Workflow vs Activity</b>：
+ * <ul>
+ *   <li>Workflow：可重放控制流；{@link #execute}、Signal 处理须确定性</li>
+ *   <li>{@link Activities}：DB、外部 IO、非确定性逻辑；可重试、至少一次投递</li>
+ * </ul></p>
+ *
+ * <p>Signal = 异步控制意图；Query = 只读快照，不改变 Workflow 状态。</p>
  */
 @WorkflowInterface
 public interface DurableRunWorkflow {

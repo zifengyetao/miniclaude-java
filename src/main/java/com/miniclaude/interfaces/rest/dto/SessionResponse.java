@@ -3,19 +3,21 @@ package com.miniclaude.interfaces.rest.dto;
 import java.time.Instant;
 
 /**
- * 会话元数据响应体。
+ * 会话元数据 GET/POST 响应体 DTO。
+ * <p>
+ * 不含消息历史，仅暴露会话级元信息供列表与详情展示。
  */
 public class SessionResponse {
 
-    /** 会话唯一标识。 */
+    /** 会话 UUID 主键。 */
     private String id;
-    /** 创建时间。 */
+    /** 会话创建时间（UTC）。 */
     private Instant createdAt;
-    /** 最近活跃时间。 */
+    /** 最近一次聊天或 touch 的活跃时间。 */
     private Instant lastActiveAt;
-    /** 绑定的模型。 */
+    /** 当前绑定的 LLM 模型 ID。 */
     private String model;
-    /** 会话标题。 */
+    /** 会话标题，通常由首条用户消息截断生成。 */
     private String title;
 
     public SessionResponse() {

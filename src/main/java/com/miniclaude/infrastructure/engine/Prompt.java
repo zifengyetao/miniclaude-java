@@ -19,22 +19,45 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
- * 系统提示词构建器。
+ * 系统提示词（System Prompt）构建器 —— 组装 Agent 的静态/动态 system 上下文与用户轮次 reminder。
  *
- * <p>职责：组装 Agent 的 system prompt（静态模板 + 动态环境上下文），
- * 解析 {@code @include} 引用、加载 CLAUDE.md / rules、收集 Git 状态，
- * 并生成每轮用户消息附带的 {@code <system-reminder>}。
+ * <p><b>核心职责</b></p>
+ * <ul>
+ *   <li>维护内嵌 {@link #SYSTEM_PROMPT_TEMPLATE}：Mini Claude Code 的行为准则、工具使用、安全与输出风格。</li>
+ *   <li>解析 Markdown 中的 {@code @./path}、{@code @~/path}、{@code @/abs/path} 引用并递归展开
+ *       （{@link #resolveIncludes}，防循环、限深度）。</li>
+ *   <li>从 cwd 向上遍历加载 {@code CLAUDE.md} 与 {@code .claude/rules/*.md}，合并为项目指令。</li>
+ *   <li>收集 Git 分支、最近提交、工作区状态摘要（{@link #getGitContext}）。</li>
+ *   <li>静态/动态拆分（{@link #buildStaticSystemPrompt} / {@link #buildDynamicSystemContext}），
+ *       支持 Anthropic prefix caching：静态部分可缓存，动态部分随环境变化。</li>
+ *   <li>每轮用户消息附带 {@link #buildUserContextReminder}（日期 + CLAUDE.md 摘要）。</li>
+ * </ul>
  *
- * <p>在系统中的位置：{@code infrastructure/engine} 层，
- * 由 {@link Agent} 初始化时调用；静态/动态拆分支持 Anthropic prefix caching。
+ * <p><b>在系统中的位置</b></p>
+ * <ul>
+ *   <li>包路径：{@code infrastructure/engine}。</li>
+ *   <li>调用方：{@link Agent} 初始化与每轮对话前构建 prompt。</li>
+ *   <li>依赖：{@link Memory}、{@link Skills}、{@link Subagent}、{@link Tools} 提供动态段落。</li>
+ * </ul>
+ *
+ * <p>本类为工具类，禁止实例化。</p>
+ *
+ * @see Agent
+ * @see Memory
  */
 public final class Prompt {
 
+    /** 私有构造器：工具类不可实例化。 */
     private Prompt() {}
 
     // ─── 内嵌系统提示词模板 ─────────────────────────────────────
 
-    /** 静态系统提示词模板（不含工作目录等动态信息）。 */
+    /**
+     * 静态系统提示词模板（英文）：不含工作目录、Git、Memory 等运行时动态信息。
+     *
+     * <p>涵盖：角色定义、安全边界、任务执行原则、联网研究、风险操作确认、
+     * 专用工具优先、语气与简洁输出等。由 {@link #buildStaticSystemPrompt()} 原样返回。</p>
+     */
     public static final String SYSTEM_PROMPT_TEMPLATE =
             "You are Mini Claude Code, a lightweight coding assistant CLI.\n"
                     + "You are an interactive agent that helps users with software engineering tasks and general research questions. Use the instructions below and the tools available to you to assist the user.\n"
@@ -119,16 +142,39 @@ public final class Prompt {
 
     // ─── @include 文件引用解析 ───────────────────────────────────
 
+    /**
+     * 匹配独立一行的 {@code @path} 引用：{@code @./rel}、{@code @~/home-rel}、{@code @/abs}。
+     *
+     * <p>MULTILINE 模式下 {@code ^} 匹配行首。</p>
+     */
     private static final Pattern INCLUDE_RE =
             Pattern.compile("^@(\\./[^\\s]+|~/[^\\s]+|/[^\\s]+)$", Pattern.MULTILINE);
+
+    /** {@code @include} 递归展开的最大深度，防止深层嵌套或恶意链式引用。 */
     private static final int MAX_INCLUDE_DEPTH = 5;
 
-    /** 解析内容中的 {@code @./path} 引用并递归展开（最大深度 {@link #MAX_INCLUDE_DEPTH}）。 */
+    /**
+     * 解析内容中的 {@code @path} 引用并递归展开（从 {@code basePath} 解析相对路径）。
+     *
+     * @param content  待处理的 Markdown/文本
+     * @param basePath 相对路径 {@code @./} 的基准目录
+     * @return 展开后的字符串
+     * @sideeffects 可能读取被引用文件；使用新的 visited 集合
+     */
     public static String resolveIncludes(String content, Path basePath) {
         return resolveIncludes(content, basePath, new HashSet<>(), 0);
     }
 
-    /** 带 visited 集合与深度的 @include 解析（防循环引用）。 */
+    /**
+     * 带 visited 集合与深度的 {@code @include} 解析：检测循环引用、文件缺失与读错误。
+     *
+     * @param content  原始内容
+     * @param basePath 相对路径基准
+     * @param visited  已访问文件的绝对路径键集合，防循环
+     * @param depth    当前递归深度
+     * @return 替换 @ 引用后的内容；达 {@link #MAX_INCLUDE_DEPTH} 时原样返回
+     * @sideeffects 可能递归读取多个文件；visited 会被修改
+     */
     public static String resolveIncludes(String content, Path basePath, Set<String> visited, int depth) {
         if (depth >= MAX_INCLUDE_DEPTH) {
             return content;
@@ -140,6 +186,7 @@ public final class Prompt {
             String raw = matcher.group(1);
             String replacement;
             Path resolved;
+            // 按前缀解析路径：~/ 用户目录、/ 绝对、./ 相对 basePath
             if (raw.startsWith("~/")) {
                 resolved = Paths.get(System.getProperty("user.home")).resolve(raw.substring(2));
             } else if (raw.startsWith("/")) {
@@ -157,6 +204,7 @@ public final class Prompt {
                 try {
                     visit.add(key);
                     String included = new String(Files.readAllBytes(resolved), StandardCharsets.UTF_8);
+                    // 被包含文件以其父目录为 base 继续递归
                     replacement = resolveIncludes(included, resolved.getParent(), visit, depth + 1);
                 } catch (Exception e) {
                     replacement = "<!-- error reading: " + raw + " -->";
@@ -168,6 +216,13 @@ public final class Prompt {
         return sb.toString();
     }
 
+    /**
+     * 加载指定目录下 {@code .claude/rules/*.md}，排序后合并为 Rules 章节。
+     *
+     * @param directory 项目根或某层目录
+     * @return 含 {@code ## Rules} 前缀的 Markdown，无 rules 时返回空串
+     * @sideeffects 读取 rules 目录下 .md 文件
+     */
     private static String loadRulesDir(Path directory) {
         Path rulesDir = directory.resolve(".claude").resolve("rules");
         if (!Files.isDirectory(rulesDir)) {
@@ -197,10 +252,19 @@ public final class Prompt {
         }
     }
 
-    /** 从当前目录向上收集所有 CLAUDE.md 及 .claude/rules/*.md 内容。 */
+    /**
+     * 从当前工作目录向上遍历，收集所有层级 {@code CLAUDE.md} 及 cwd 的 {@code .claude/rules}。
+     *
+     * <p>越靠近 cwd 的 CLAUDE.md 在合并时排在越后（内层覆盖语义由 Agent 阅读顺序决定；
+     * 此处用 {@code parts.add(0, ...)} 使根目录在前、子目录在后）。</p>
+     *
+     * @return Project Instructions + Rules 的 Markdown；无任何内容时可能仅含 rules 或空串
+     * @sideeffects 读取文件系统上多个 CLAUDE.md 与 rules
+     */
     public static String loadClaudeMd() {
         List<String> parts = new ArrayList<>();
         Path d = Paths.get("").toAbsolutePath().normalize();
+        // 自 cwd 向根目录.walk
         while (true) {
             Path f = d.resolve("CLAUDE.md");
             if (Files.isRegularFile(f)) {
@@ -226,7 +290,12 @@ public final class Prompt {
         return claudeMd + rules;
     }
 
-    /** 获取当前工作区的 Git 分支、最近提交与工作区状态摘要。 */
+    /**
+     * 获取当前 Git 仓库的分支名、最近 5 条 oneline 提交与工作区 short status。
+     *
+     * @return 多行 Git 摘要 Markdown；非 git 目录或命令失败返回空串
+     * @sideeffects 启动最多 3 个 {@code git} 子进程（各 3 秒超时）
+     */
     public static String getGitContext() {
         try {
             String branch = runGit("rev-parse", "--abbrev-ref", "HEAD");
@@ -245,6 +314,14 @@ public final class Prompt {
         }
     }
 
+    /**
+     * 在 cwd 执行 {@code git} 子命令并收集 stdout（stderr 合并到 stdout）。
+     *
+     * @param args git 子命令及参数
+     * @return  trimmed 输出；超时或失败时由调用方处理（{@link #getGitContext} 外层 catch）
+     * @throws Exception 进程启动失败
+     * @sideeffects 启动 git 子进程，最多等待 3 秒
+     */
     private static String runGit(String... args) throws Exception {
         List<String> cmd = new ArrayList<>();
         cmd.add("git");
@@ -275,12 +352,22 @@ public final class Prompt {
 
     // ─── 静态/动态拆分（prefix caching 用）──────────────────────
 
-    /** 返回可缓存的静态系统提示词部分。 */
+    /**
+     * 返回可缓存的静态系统提示词部分（即 {@link #SYSTEM_PROMPT_TEMPLATE}）。
+     *
+     * @return 静态 system prompt 字符串
+     * @sideeffects 无
+     */
     public static String buildStaticSystemPrompt() {
         return SYSTEM_PROMPT_TEMPLATE;
     }
 
-    /** 返回随环境变化的动态上下文（工作目录、Git、Memory、Skills、Subagent 等）。 */
+    /**
+     * 返回随环境变化的动态 system 上下文：工作目录、OS、Shell、Git、Memory、Skills、Subagent、延迟工具说明。
+     *
+     * @return {@code # Environment} 开头的 Markdown 段落
+     * @sideeffects 调用 {@link #getGitContext()}、{@link Memory#buildMemoryPromptSection()} 等，可能读盘/执行 git
+     */
     public static String buildDynamicSystemContext() {
         String plat = System.getProperty("os.name") + " " + System.getProperty("os.arch");
         String osName = System.getProperty("os.name", "").toLowerCase();
@@ -312,7 +399,12 @@ public final class Prompt {
                 + gitContext + memorySection + skillsSection + agentSection + deferredSection;
     }
 
-    /** 构建每轮用户消息附带的 {@code <system-reminder>}（含日期与 CLAUDE.md）。 */
+    /**
+     * 构建每轮用户消息附带的 {@code <system-reminder>}：可选 CLAUDE.md 摘要 + 当前日期。
+     *
+     * @return 完整 reminder XML 块
+     * @sideeffects 调用 {@link #loadClaudeMd()} 可能读多个文件
+     */
     public static String buildUserContextReminder() {
         String today = LocalDate.now().toString();
         String claudeMd = loadClaudeMd();
@@ -326,7 +418,12 @@ public final class Prompt {
                 + "</system-reminder>";
     }
 
-    /** 组装完整 system prompt（静态 + 动态，不含 user reminder）。 */
+    /**
+     * 组装完整 system prompt：静态模板 + 空行 + 动态上下文（不含 user reminder）。
+     *
+     * @return 完整 system 字符串
+     * @sideeffects 同 {@link #buildDynamicSystemContext()}
+     */
     public static String buildSystemPrompt() {
         return buildStaticSystemPrompt() + "\n\n" + buildDynamicSystemContext();
     }

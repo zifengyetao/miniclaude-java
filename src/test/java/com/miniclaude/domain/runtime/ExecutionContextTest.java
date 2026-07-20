@@ -14,6 +14,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class ExecutionContextTest {
 
+    /** 工作区路径 normalize 为绝对路径；tenant/session/run/trace 去首尾空白。 */
     @Test
     void normalizesWorkspaceAndCarriesAllBoundaryIdentifiers() {
         ExecutionContext context = new ExecutionContext(
@@ -31,6 +32,7 @@ class ExecutionContextTest {
         assertThat(context.getTraceId()).isEqualTo("trace-a");
     }
 
+    /** traceId 为空字符串时构造器应拒绝，避免分布式追踪链断裂。 */
     @Test
     void rejectsMissingBoundaryIdentifiers() {
         assertThatThrownBy(() -> new ExecutionContext(

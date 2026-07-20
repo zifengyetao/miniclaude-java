@@ -36,6 +36,7 @@ class AgentOpsGovernanceTest {
     @Autowired EvaluationService evaluations;
     @Autowired AuditService audits;
 
+    /** 已发布版本不可被同坐标草稿覆盖；resolve(latest) 与 manifest pin 精确 hash。 */
     @Test
     void publishedVersionsAreImmutableAndManifestPinsExactHash() {
         VersionedAsset draft = registry.createDraft("t1", VersionedAsset.Type.PROMPT,
@@ -59,6 +60,7 @@ class AgentOpsGovernanceTest {
                 .isEqualTo(AgentReleaseManifest.Status.RELEASED);
     }
 
+    /** DENY 优先于 ALLOW；同优先级 ALLOW 与 REQUIRE_APPROVAL 冲突时 fail-closed 为 DENY。 */
     @Test
     void denyWinsAndConflictsFailClosed() {
         PolicyRule allow = rule("allow", 100, PolicyRule.Effect.ALLOW);
@@ -73,6 +75,7 @@ class AgentOpsGovernanceTest {
                 .isEqualTo(PolicyDecision.Outcome.DENY);
     }
 
+    /** safetyPassed=false 否决 release gate；审计 append 形成 PREVIOUS_HASH 链。 */
     @Test
     void safetyFailureVetoesReleaseAndAuditIsAppended() {
         Map<String, Double> thresholds = metrics(0.8, 0.9, 10.0, 1000.0);

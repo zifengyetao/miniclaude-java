@@ -67,6 +67,11 @@ public class ReleaseManifestService {
         return get(id);
     }
 
+    /**
+     * 将 DRAFT 清单发布为 RELEASED。
+     *
+     * @param expectedHash 乐观锁：须与 verify 后 manifestHash 一致
+     */
     @Transactional
     public AgentReleaseManifest release(String id, String expectedHash, String actor) {
         // expectedHash 是乐观确认令牌：审批者确认的是当前清单，而不是同 ID 下可能变化的内容。
@@ -83,6 +88,11 @@ public class ReleaseManifestService {
         return get(id);
     }
 
+    /**
+     * 验证清单 hash 与各 pin 资产内容 hash。
+     *
+     * @throws IllegalStateException hash 或 pin 不一致
+     */
     public AgentReleaseManifest verify(String id) {
         AgentReleaseManifest manifest = get(id);
         // 先验证清单整体，再逐项验证 pin；两层校验分别覆盖清单编排篡改与资产正文篡改。
@@ -102,6 +112,7 @@ public class ReleaseManifestService {
         return manifest;
     }
 
+    /** @throws IllegalArgumentException 清单不存在 */
     public AgentReleaseManifest get(String id) {
         List<AgentReleaseManifest> rows = jdbc.query("SELECT * FROM agent_release_manifest WHERE id=?", mapper, id);
         if (rows.isEmpty()) throw new IllegalArgumentException("manifest not found");

@@ -11,14 +11,31 @@ import java.util.EnumSet;
 
 @Configuration
 /**
- * 启动时补齐场景所需的内置 Agent 定义。
+ * 平台启动种子数据：补齐内置场景所需的 {@link AgentDefinition} 模板。
  *
- * <p>名称必须与 RolePack 目录查找一致；仅在缺失时创建，避免重启产生重复定义。
- * 普通试点为 L2，而受监管风控和交易被硬限制为 L1 且仅允许 GRAPH：它们只能进行
- * 低风险、受控的配置/提示级演进，不能自主修改策略、审批图或增加外部动作能力。</p>
+ * <p><b>触发时机</b>：Spring {@link CommandLineRunner}，应用就绪后执行一次。</p>
+ *
+ * <p><b>幂等策略</b>：按<b>名称</b>判断是否已存在（{@link #missing}），存在则跳过。
+ * 避免 Flyway 清库后重复插入，也避免每次重启产生重复定义。</p>
+ *
+ * <p><b>进化级别约束（为何 L1 vs L2）</b>：
+ * <ul>
+ *   <li>试点场景（Coding/分析/客服）：{@link AgentDefinition.EvolutionLevel#L2}——
+ *       允许受控的配置/提示级自进化，仍禁止 L4 与策略图篡改</li>
+ *   <li>监管场景（风控/交易）：{@link AgentDefinition.RiskLevel#REGULATED} +
+ *       {@link AgentDefinition.EvolutionLevel#L1} + 仅 {@link ExecutionMode#GRAPH}——
+ *       硬限制进化不能引入 submit/处置能力；与 Fake 适配器、四眼审批链路对齐</li>
+ * </ul></p>
+ *
+ * <p><b>名称必须与 RolePack 目录查找一致</b>，否则场景服务无法绑定员工定义。</p>
  */
 public class PlatformSeedConfig {
 
+    /**
+     * 注册 CommandLineRunner Bean，在启动时种子化 Agent 模板。
+     *
+     * @param platform 平台应用服务，封装 createAgent / listAgents
+     */
     @Bean
     CommandLineRunner seedPlatformTemplates(AgentPlatformService platform) {
         return args -> {
@@ -72,6 +89,12 @@ public class PlatformSeedConfig {
         };
     }
 
+    /**
+     * 按显示名称判断是否尚无同名 Agent 定义。
+     *
+     * @param platform 平台服务
+     * @param name     种子模板名称（与 RolePack 对齐）
+     */
     private static boolean missing(AgentPlatformService platform, String name) {
         return platform.listAgents().stream().noneMatch(agent -> agent.getName().equals(name));
     }

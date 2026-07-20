@@ -74,7 +74,13 @@ public class ScenarioCatalog {
         return refs;
     }
 
+    /** @return 全部内置试点 RolePack */
     public List<RolePack> list() { return Collections.unmodifiableList(new ArrayList<>(packs.values())); }
+
+    /**
+     * @param id 场景 ID
+     * @throws IllegalArgumentException 模板不存在
+     */
     public RolePack get(String id) {
         RolePack pack = packs.get(id);
         if (pack == null) throw new IllegalArgumentException("scenario template not found: " + id);

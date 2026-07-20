@@ -27,6 +27,7 @@ class AgentPlatformServiceTest {
     @Autowired
     private AgentPlatformService platform;
 
+    /** Flyway 种子中的 Coding Agent 可见，startRun 后状态为 PENDING 且出现在 listRuns。 */
     @Test
     void seedsTemplatesAndPersistsRun() {
         // 使用实际种子数据而非伪造仓储，防止迁移、映射和服务编排之间出现契约漂移。

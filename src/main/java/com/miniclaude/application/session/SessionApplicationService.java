@@ -17,7 +17,13 @@ import java.util.UUID;
 /**
  * 会话管理应用服务。
  * <p>
- * 负责会话的创建、查询、列表与删除，与聊天服务解耦以支持独立 REST 端点。
+ * <b>职责</b>：会话 CRUD，与 {@link com.miniclaude.application.chat.ChatApplicationService} 解耦，
+ * 支持独立 {@code /api/v1/sessions} REST 端点。
+ * <p>
+ * <b>上游</b>：{@link com.miniclaude.interfaces.rest.SessionController}。
+ * <b>下游</b>：{@link SessionRepository}、{@link AgentGateway}（删除时释放资源）。
+ * <p>
+ * <b>安全/约束</b>：当前无租户隔离；删除须先 closeSession 再删元数据，顺序不可颠倒。
  */
 @Service
 public class SessionApplicationService {
@@ -39,6 +45,10 @@ public class SessionApplicationService {
 
     /**
      * 创建新会话；未指定模型时使用全局默认模型。
+     *
+     * @param model 可 null/空白，回退 {@code defaultSettings.getModel()}
+     * @return 已持久化的新会话
+     * @implNote 副作用：写入 {@link SessionRepository}
      */
     public ChatSession create(String model) {
         String m = StringUtils.hasText(model) ? model : defaultSettings.getModel();
@@ -56,13 +66,20 @@ public class SessionApplicationService {
                 .orElseThrow(() -> new SessionNotFoundException(id));
     }
 
-    /** 返回全部会话列表。 */
+    /**
+     * 返回全部会话列表（无分页、无租户过滤）。
+     *
+     * @return 仓储中全部会话的快照
+     */
     public List<ChatSession> list() {
         return sessionRepository.findAll();
     }
 
     /**
      * 删除会话并释放引擎侧资源。
+     *
+     * @param id 会话 ID
+     * @implNote 副作用：closeSession + delete；closeSession 应幂等以支持重复 DELETE
      */
     public void delete(String id) {
         /*

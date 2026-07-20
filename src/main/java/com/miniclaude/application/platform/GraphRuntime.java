@@ -29,6 +29,20 @@ public class GraphRuntime {
         this.orchestrator = orchestrator;
     }
 
+    /**
+     * 执行单个确定性图节点并持久化步骤。
+     *
+     * @param graph           完整图定义（执行前重新校验）
+     * @param tenantId        租户
+     * @param runId           持久 Run ID
+     * @param nodeId          待执行节点
+     * @param state           当前状态快照；null 时视为空 Map
+     * @param idempotencyKey  稳定幂等键，重试/恢复时必传同一值
+     * @return 含下一节点、是否终态、更新后 Run 与状态的 {@link Transition}
+     * @throws IllegalArgumentException 图校验失败或节点不存在
+     * @throws IllegalStateException 节点类型需外部执行器（LLM/TOOL 等），本运行时 fail-closed
+     * @implNote 副作用：{@code orchestrator.recordStep} 写入 checkpoint；不修改入参 state 对象
+     */
     public Transition executeNode(GraphSpec graph, String tenantId, String runId, String nodeId,
                                   Map<String, Object> state, String idempotencyKey) {
         // 执行前重新验证图和节点类型，避免持久化一个无法由当前图定义解释的恢复点。
@@ -67,12 +81,17 @@ public class GraphRuntime {
         return actual != null && actual.toString().equals(condition.substring(separator + 1).trim());
     }
 
-    /** 一次已持久化节点转换的只读结果。 */
+    /** 一次已持久化节点转换的只读结果快照。 */
     public static final class Transition {
+        /** 刚完成的节点 ID */
         private final String completedNode;
+        /** 边条件匹配后的下一节点 ID；无匹配出边时为 null */
         private final String nextNode;
+        /** 完成节点是否为 TERMINAL 类型 */
         private final boolean terminal;
+        /** 记录步骤后的 Run 快照 */
         private final AgentRun run;
+        /** 含 {@code _lastNode}、{@code _graphVersion} 等元数据的新状态副本 */
         private final Map<String, Object> state;
 
         public Transition(String completedNode, String nextNode, boolean terminal, AgentRun run,
@@ -80,10 +99,15 @@ public class GraphRuntime {
             this.completedNode = completedNode; this.nextNode = nextNode; this.terminal = terminal;
             this.run = run; this.state = state;
         }
+        /** @return 已完成节点 ID */
         public String getCompletedNode() { return completedNode; }
+        /** @return 下一节点 ID，可能为 null */
         public String getNextNode() { return nextNode; }
+        /** @return 是否到达终态节点 */
         public boolean isTerminal() { return terminal; }
+        /** @return 持久化步骤后的 Run */
         public AgentRun getRun() { return run; }
+        /** @return 不可变语义的新状态 Map（调用方不应原地修改） */
         public Map<String, Object> getState() { return state; }
     }
 }

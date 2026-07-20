@@ -12,6 +12,17 @@ infrastructure/      # 适配器 + 原 Agent 引擎（engine/）
 web-console/         # React + TypeScript 企业 Agent 工作台
 ```
 
+## 文档（给人类 & AI，省扫描成本）
+
+新会话或换模型时，先读 **[docs/README.md](docs/README.md)**，再按需打开代码：
+
+- [docs/overview.md](docs/overview.md) — 总览与硬约束
+- [docs/agent-flows.md](docs/agent-flows.md) — Chat / Coding / 客服 / 风控等执行链路
+- [docs/code-map.md](docs/code-map.md) — 包结构、API、关键类
+- [docs/architecture.md](docs/architecture.md) / [security.md](docs/security.md) / [operations.md](docs/operations.md)
+
+编程助手入口：[AGENTS.md](AGENTS.md)、[CLAUDE.md](CLAUDE.md)。
+
 ## 快速开始
 
 ### Docker Compose（推荐私有化体验）

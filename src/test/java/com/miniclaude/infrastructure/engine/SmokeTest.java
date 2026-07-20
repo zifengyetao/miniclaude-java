@@ -51,6 +51,7 @@ public final class SmokeTest {
 
     // ─── 各模块测试 ───────────────────────────────────────────────
 
+    // ─── Frontmatter：YAML 头解析、正文分离与 roundtrip ───
     private static void testFrontmatter() {
         System.out.println("[Frontmatter]");
         String raw = "---\nname: demo\ntype: project\ndescription: hello\n---\n\nBody here.";
@@ -61,6 +62,7 @@ public final class SmokeTest {
         ok("roundtrip starts with ---", fmt.startsWith("---\n"), fmt.substring(0, Math.min(20, fmt.length())));
     }
 
+    // ─── Tools：工具定义、read/list/grep/shell 与危险命令检测 ───
     private static void testToolsListAndRead() throws Exception {
         System.out.println("[Tools]");
         ok("tool defs >= 10", Tools.TOOL_DEFINITIONS.size() >= 10,
@@ -99,6 +101,7 @@ public final class SmokeTest {
         Files.deleteIfExists(tmp);
     }
 
+    // ─── Permission：default/plan/bypass 模式下读写 shell 权限矩阵 ───
     private static void testPermission() {
         System.out.println("[Permission]");
         Map<String, Object> read = new HashMap<>();
@@ -121,6 +124,7 @@ public final class SmokeTest {
         ok("plan blocks write", "deny".equals(p4.get("action")), String.valueOf(p4));
     }
 
+    // ─── Autonomy：Goal/Loop/Block 解析与 fail-closed、wakeup clamp ───
     private static void testAutonomy() {
         System.out.println("[Autonomy]");
         Autonomy.GoalVerdict gv = Autonomy.parseGoalVerdict("{\"ok\": true, \"reason\": \"done\"}");
@@ -150,6 +154,7 @@ public final class SmokeTest {
                 rules.keySet().toString());
     }
 
+    // ─── Session：JSON 会话文件 roundtrip 后清理临时文件 ───
     private static void testSession() throws Exception {
         System.out.println("[Session]");
         String id = "smoke-test-" + System.currentTimeMillis();
@@ -166,6 +171,7 @@ public final class SmokeTest {
         Files.deleteIfExists(Session.SESSION_DIR.resolve(id + ".json"));
     }
 
+    // ─── Prompt：system prompt 非空且含工作目录；user reminder 含日期占位 ───
     private static void testPrompt() {
         System.out.println("[Prompt]");
         String sys = Prompt.buildSystemPrompt();
@@ -176,6 +182,7 @@ public final class SmokeTest {
                 reminder.substring(0, Math.min(120, reminder.length())));
     }
 
+    // ─── Subagent：explore 只读工具集；general 允许除 agent 外全部工具 ───
     private static void testSubagent() {
         System.out.println("[Subagent]");
         Subagent.SubAgentConfig explore = Subagent.getSubAgentConfig("explore");
@@ -187,6 +194,7 @@ public final class SmokeTest {
         ok("general all-except-agent", general.allowedToolNames == null, String.valueOf(general.allowedToolNames));
     }
 
+    // ─── CliMain：CLI 参数解析 yolo/model/prompt 与 permission mode 映射 ───
     private static void testCliArgs() {
         System.out.println("[CliMain CLI]");
         CliMain.CliArgs a = CliMain.parseArgs(new String[]{"--yolo", "--model", "gpt-4o", "hello", "world"});

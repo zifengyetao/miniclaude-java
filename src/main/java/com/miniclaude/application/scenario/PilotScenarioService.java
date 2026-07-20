@@ -71,8 +71,15 @@ public class PilotScenarioService {
         this.approvalThreshold = threshold;
     }
 
+    /** @return 试点场景 RolePack 列表 */
     public List<RolePack> templates() { return catalog.list(); }
 
+    /**
+     * 启动试点场景 Run 并同步执行至完成、审批暂停或安全阻断。
+     *
+     * @param scenario {@link ScenarioCatalog} 中已注册 ID
+     * @implNote 副作用：Run、步骤、制品、可能的审批与指标；外部系统均为 Fake
+     */
     public AgentRun start(String tenant, String scenario, Map<String, Object> input) {
         RolePack pack = catalog.get(scenario);
         validate(pack);
@@ -90,6 +97,12 @@ public class PilotScenarioService {
         return platform.getRun(run.getId());
     }
 
+    /**
+     * 继续已暂停的 Run（仅 data-analyst 成本审批场景）。
+     *
+     * @throws IllegalArgumentException 非 analyst 场景
+     * @throws IllegalStateException 未获批或缺少 ANALYSIS_REQUEST 制品
+     */
     public AgentRun continueRun(String tenant, String scenario, String runId) {
         if (!ScenarioCatalog.ANALYST.equals(scenario)) {
             throw new IllegalArgumentException("only data-analyst has a resumable approval boundary");
@@ -109,12 +122,18 @@ public class PilotScenarioService {
         return platform.getRun(runId);
     }
 
+    /**
+     * 查询 Run 并校验租户。
+     *
+     * @throws IllegalArgumentException 租户不匹配
+     */
     public AgentRun status(String tenant, String runId) {
         AgentRun run = platform.getRun(runId);
         requireTenant(tenant, run);
         return run;
     }
 
+    /** 列出 Run 场景制品（先 {@link #status} 校验租户）。 */
     public List<ScenarioArtifact> artifacts(String tenant, String runId) {
         status(tenant, runId);
         return artifacts.findByRun(tenant, runId);

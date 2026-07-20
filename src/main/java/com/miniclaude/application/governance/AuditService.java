@@ -25,6 +25,12 @@ public class AuditService {
         this.jdbc = jdbc;
     }
 
+    /**
+     * 追加一条审计事件到租户 hash 链。
+     *
+     * @return 新插入的审计行 Map
+     * @implNote 副作用：INSERT；无 update/delete API
+     */
     public Map<String, Object> append(String tenantId, String actorType, String actorId,
                                       String operation, String resourceType, String resourceId,
                                       String decision, String payload, String traceId, String runId) {
@@ -51,6 +57,12 @@ public class AuditService {
         return get(id);
     }
 
+    /**
+     * 按租户及可选资源过滤查询审计事件（降序）。
+     *
+     * @param resourceType 可 null，非空时过滤
+     * @param resourceId   可 null，非空时过滤
+     */
     public List<Map<String, Object>> query(String tenantId, String resourceType, String resourceId) {
         StringBuilder sql = new StringBuilder("SELECT * FROM audit_event WHERE tenant_id=?");
         java.util.ArrayList<Object> args = new java.util.ArrayList<>();

@@ -1,5 +1,7 @@
 # 架构与集成边界
 
+> 总览见 [overview.md](./overview.md)；Agent 链路见 [agent-flows.md](./agent-flows.md)；包与 API 见 [code-map.md](./code-map.md)。
+
 ## 运行时
 
 系统按 `interfaces → application → domain ← infrastructure` 分层。Spring Boot 后端提供 `/api/v1`，React 工作台通过同源 nginx 的 `/api` 反向代理访问后端；PostgreSQL 保存平台、治理、审批、场景工件和 durable run 数据。

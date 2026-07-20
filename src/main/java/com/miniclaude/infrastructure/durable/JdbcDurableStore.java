@@ -18,11 +18,22 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * 以 JDBC 实现事件、checkpoint 与审批三个持久契约。
+ * Durable 层 JDBC 持久化：事件日志、Checkpoint、审批三合一仓储。
  *
- * <p>所有写入先锁定所属运行，以同一把行锁串行分配跨表序列；因此事件、快照和审批可以
- * 合并为一条稳定时间线。数据库唯一约束负责兜住并发幂等冲突，事务负责避免只写入其中
- * 一部分。任何摘要、版本或状态不匹配都按 fail-closed 处理。</p>
+ * <p><b>实现端口</b>：{@link DurableStores.RunEventStore}、
+ * {@link DurableStores.CheckpointStore}、{@link DurableStores.ApprovalService}。</p>
+ *
+ * <p><b>序列号设计</b>：{@link #nextSequence} 跨 {@code run_event}、
+ * {@code run_checkpoint}、{@code approval_request} 三表取 MAX+1，使单一 {@code sequence_no}
+ * 能还原「事件—快照—审批」的全局提交顺序。每次写入前 {@link #lockRun}（{@code FOR UPDATE}）
+ * 串行化同 Run 的并发写。</p>
+ *
+ * <p><b>幂等与完整性</b>：
+ * <ul>
+ *   <li>事件：同 idempotency_key 只允许相同 type+payload_hash 重放</li>
+ *   <li>审批：decide 时比对 action_hash，参数变更即拒绝；过期先物化 EXPIRED 再 fail</li>
+ *   <li>{@link #sha256} 用于 payload/审批参数绑定，非加密签名</li>
+ * </ul></p>
  */
 @Repository
 public class JdbcDurableStore implements DurableStores.RunEventStore,
@@ -194,6 +205,11 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                 Timestamp.from(Instant.now()), tenantId, Timestamp.from(Instant.now()));
     }
 
+    /**
+     * 计算跨 event/checkpoint/approval 的下一个全局 sequence_no。
+     *
+     * <p>调用方须已 {@link #lockRun}，否则并发可能分配重复序号。</p>
+     */
     private long nextSequence(String tenantId, String runId) {
         // 序列跨三张表计算，才能按一个数字还原“事件—快照—审批”的真实提交顺序。
         // 调用者已经持有运行行锁，因此 MAX+1 在同一运行内不会并发冲突。
@@ -207,6 +223,11 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
         return value == null ? 1 : value;
     }
 
+    /**
+     * 对 {@code agent_run} 行加 {@code FOR UPDATE} 锁，并校验 tenant+run 存在。
+     *
+     * <p>所有 append/save/request/decide 的序列化锚点。</p>
+     */
     private void lockRun(String tenantId, String runId) {
         // 运行行既是存在性/租户校验，也是所有持久子记录共享的序列化锁。
         List<String> ids = jdbc.query("SELECT id FROM agent_run WHERE tenant_id=? AND id=? FOR UPDATE",
@@ -214,6 +235,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
         if (ids.isEmpty()) throw new IllegalArgumentException("run not found");
     }
 
+    /** ResultSet → {@link RunEvent} */
     private RunEvent event(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
         return new RunEvent(rs.getString("id"), rs.getString("tenant_id"), rs.getString("run_id"),
                 rs.getString("step_id"), rs.getLong("sequence_no"), rs.getString("event_type"),
@@ -222,6 +244,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                 rs.getTimestamp("created_at").toInstant());
     }
 
+    /** ResultSet → {@link RunCheckpoint} */
     private RunCheckpoint checkpoint(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
         return new RunCheckpoint(rs.getString("id"), rs.getString("tenant_id"), rs.getString("run_id"),
                 rs.getString("step_id"), rs.getLong("sequence_no"), rs.getLong("version"),
@@ -229,6 +252,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
                 rs.getTimestamp("created_at").toInstant());
     }
 
+    /** ResultSet → {@link ApprovalRequest} */
     private ApprovalRequest approval(java.sql.ResultSet rs, int row) throws java.sql.SQLException {
         Timestamp decided = rs.getTimestamp("decided_at");
         return new ApprovalRequest(rs.getString("id"), rs.getString("tenant_id"), rs.getString("run_id"),
@@ -258,6 +282,7 @@ public class JdbcDurableStore implements DurableStores.RunEventStore,
         }
     }
 
+    /** 非空非空白字符串校验，用于写入前 fail-fast */
     private static void require(String value, String name) {
         if (value == null || value.trim().isEmpty()) throw new IllegalArgumentException(name + " required");
     }

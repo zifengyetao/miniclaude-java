@@ -59,10 +59,16 @@ public class AgentPlatformService {
                 executionModes));
     }
 
+    /** @return 全部 Agent 定义列表 */
     public List<AgentDefinition> listAgents() {
         return definitions.findAll();
     }
 
+    /**
+     * @param id 定义主键
+     * @return 定义快照
+     * @throws IllegalArgumentException 不存在时
+     */
     public AgentDefinition getAgent(String id) {
         return definitions.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("agent not found: " + id));
@@ -97,6 +103,7 @@ public class AgentPlatformService {
                 maxCostUsd));
     }
 
+    /** @return 全部 Run 列表 */
     public List<AgentRun> listRuns() {
         return runs.findAll();
     }
@@ -123,6 +130,11 @@ public class AgentPlatformService {
                 Duration.ofSeconds(timeout));
     }
 
+    /**
+     * @param id Run 主键
+     * @return Run 快照
+     * @throws IllegalArgumentException 不存在时
+     */
     public AgentRun getRun(String id) {
         return runs.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("run not found: " + id));

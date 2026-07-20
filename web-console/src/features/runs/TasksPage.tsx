@@ -1,6 +1,17 @@
 /**
- * 任务中心负责创建持久化运行、提交暂停/恢复/取消命令，并展示事件与检查点证据。
- * 当前页面通过普通 API 显式刷新，不消费 SSE；展示状态可能落后于服务端实际进度。
+ * 任务中心：创建持久化运行、提交暂停/恢复/取消命令，并展示事件与检查点证据。
+ *
+ * 状态：
+ * - runs / agents：列表与创建表单所需的 Agent 下拉
+ * - selected：当前选中 Run，驱动详情面板与 details useAsync
+ * - details：依赖 selected?.id，并行加载 events + checkpoints
+ * - busy：字符串 token 区分 create 与各 run 的控制命令，防止重复点击
+ *
+ * API：
+ * - platformApi.runs.create / control（带 Idempotency-Key）
+ * - platformApi.runs.events / checkpoints
+ *
+ * 限制：显式刷新无 SSE；表格内 status 可能落后于服务端。
  */
 import { Pause, Play, Plus, RotateCcw, Square, X } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
@@ -16,16 +27,20 @@ export function TasksPage() {
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState<CreateRunRequest>({ agentId: '', executionMode: 'PLAN_EXECUTE', goal: '', maxSteps: 30, maxCostUsd: 2, timeoutSeconds: 900 })
   const [busy, setBusy] = useState('')
+  // selected 变化时重新拉取事件与检查点；无选中时 loader 返回空数组对。
   const details = useAsync(async () => selected ? Promise.all([platformApi.runs.events(selected.id), platformApi.runs.checkpoints(selected.id)]) : [[], []], [selected?.id])
 
-  /** 创建运行并刷新列表；表单约束只改善输入体验，预算、步数和权限仍由服务端校验。 */
+  /** 创建运行并刷新列表；HTML 表单约束不替代服务端预算/步数/权限校验。 */
   async function create(event: FormEvent) {
     event.preventDefault(); setBusy('create')
     try { await platformApi.runs.create(form); setOpen(false); await runs.reload() } finally { setBusy('') }
   }
+
   /**
    * 提交运行控制命令并同步返回快照。
-   * busy 只抑制当前页面重复操作，跨标签页并发与状态迁移合法性必须由服务端处理。
+   * - PAUSED 行展示 resume，否则 pause
+   * - cancel 始终可用（服务端可能拒绝非法状态迁移）
+   * busy 只抑制当前页面重复操作，跨标签页并发须服务端处理。
    */
   async function control(run: AgentRun, action: 'pause' | 'resume' | 'cancel') {
     setBusy(`${run.id}-${action}`)

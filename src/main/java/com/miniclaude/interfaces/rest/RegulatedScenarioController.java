@@ -22,15 +22,18 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-@RestController
-@RequestMapping("/api/v1/scenarios")
 /**
  * 受监管仿真场景的统一 REST 边界。
  *
- * <p>所有请求都要求显式租户；start 支持幂等键，审批、恢复和 kill switch 操作继续
- * 由服务层执行职责分离与期限检查。接口只暴露建议/草稿流程，不暴露客户不利决定或
- * 订单 submit/placeOrder 端点。</p>
+ * <p><b>职责</b>：风控调查与交易辅助两条固定路径的 HTTP 映射；场景类型由 URI 推断，
+ * 不允许请求体自选场景以 bypass 策略。
+ * <p><b>上游</b>：监管试点客户端；{@code X-Tenant-Id} 必填。
+ * <b>下游</b>：{@link RegulatedScenarioService}。
+ * <p><b>安全/约束</b>：仅建议/草稿流程；无客户不利决定、无 OMS submit/placeOrder；
+ * 四眼审批、kill switch、职责分离由服务层执行；start 支持 {@code Idempotency-Key}。
  */
+@RestController
+@RequestMapping("/api/v1/scenarios")
 public final class RegulatedScenarioController {
     private final RegulatedScenarioService scenarios;
 
@@ -38,9 +41,19 @@ public final class RegulatedScenarioController {
         this.scenarios = scenarios;
     }
 
+    /** 列出受监管场景 RolePack 模板。 */
     @GetMapping("/regulated/templates")
     public List<RolePack> templates() { return scenarios.templates(); }
 
+    /**
+     * 启动受监管仿真 Run（风控调查或交易辅助，由 URI 决定）。
+     *
+     * @param tenant         租户（必填）
+     * @param idempotencyKey 可选幂等键，重试时返回同一 Run
+     * @param input          场景输入；须含 {@code proposer} 等字段
+     * @param request        用于从 URI 解析场景类型
+     * @return 新建或幂等重放的 Run，HTTP 201
+     */
     @PostMapping({"/risk-investigation/start", "/trading-assistant/start"})
     @ResponseStatus(HttpStatus.CREATED)
     public AgentRun start(
@@ -52,12 +65,14 @@ public final class RegulatedScenarioController {
                 ? Collections.emptyMap() : input, idempotencyKey);
     }
 
+    /** 查询 Run 状态（含租户校验）。 */
     @GetMapping({"/risk-investigation/runs/{runId}", "/trading-assistant/runs/{runId}"})
     public AgentRun status(@RequestHeader("X-Tenant-Id") String tenant,
                            @PathVariable String runId) {
         return scenarios.status(tenant, runId);
     }
 
+    /** 列出 Run 产生的场景制品（案例包、提案、草稿等）。 */
     @GetMapping({"/risk-investigation/runs/{runId}/artifacts",
             "/trading-assistant/runs/{runId}/artifacts"})
     public List<ScenarioArtifact> artifacts(@RequestHeader("X-Tenant-Id") String tenant,
@@ -65,6 +80,7 @@ public final class RegulatedScenarioController {
         return scenarios.artifacts(tenant, runId);
     }
 
+    /** 列出 Run 当前四眼审批阶段的所有审批请求。 */
     @GetMapping({"/risk-investigation/runs/{runId}/approval-stage",
             "/trading-assistant/runs/{runId}/approval-stage"})
     public List<ApprovalRequest> approvals(@RequestHeader("X-Tenant-Id") String tenant,
@@ -72,6 +88,12 @@ public final class RegulatedScenarioController {
         return scenarios.approvalStage(tenant, runId);
     }
 
+    /**
+     * 提交单条四眼审批决定。
+     *
+     * @param body 须含 {@code actor}、{@code decision}；可选 {@code reason}
+     * @throws SecurityException 提案人自批、重复审批人等（403）
+     */
     @PostMapping({"/risk-investigation/runs/{runId}/approvals/{approvalId}/decision",
             "/trading-assistant/runs/{runId}/approvals/{approvalId}/decision"})
     public ApprovalRequest decide(@RequestHeader("X-Tenant-Id") String tenant,
@@ -81,6 +103,11 @@ public final class RegulatedScenarioController {
                 required(body, "decision"), text(body, "reason", ""));
     }
 
+    /**
+     * 四眼审批完成后继续 Run，生成最终建议或 OMS 草稿（仍不可提交）。
+     *
+     * @throws SecurityException 四眼条件未满足或 kill switch 激活
+     */
     @PostMapping({"/risk-investigation/runs/{runId}/continue",
             "/trading-assistant/runs/{runId}/continue"})
     public AgentRun continueRun(@RequestHeader("X-Tenant-Id") String tenant,
@@ -88,11 +115,17 @@ public final class RegulatedScenarioController {
         return scenarios.continueRun(tenant, scenario(request), runId);
     }
 
+    /** 查询租户 kill switch 是否激活。 */
     @GetMapping("/regulated/kill-switch")
     public Map<String, Object> killSwitch(@RequestHeader("X-Tenant-Id") String tenant) {
         return Collections.singletonMap("active", scenarios.killSwitch(tenant));
     }
 
+    /**
+     * 设置租户 kill switch（紧急阻断新 Run 与恢复）。
+     *
+     * @param body 须含 {@code active}、{@code actor}
+     */
     @PutMapping("/regulated/kill-switch")
     public Map<String, Object> setKillSwitch(@RequestHeader("X-Tenant-Id") String tenant,
                                              @RequestBody Map<String, Object> body) {
@@ -101,6 +134,12 @@ public final class RegulatedScenarioController {
         return Collections.singletonMap("active", value);
     }
 
+    /**
+     * 从请求 URI 解析受监管场景 ID（仅两个固定值）。
+     *
+     * @throws IllegalArgumentException URI 不匹配已知场景路径
+     * @implNote 映射只接受两个固定路径，不允许请求体自行指定并绕过相应场景策略
+     */
     private static String scenario(HttpServletRequest request) {
         String uri = request.getRequestURI();
         // 映射只接受两个固定路径，不允许请求体自行指定并绕过相应场景策略。

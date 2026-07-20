@@ -39,6 +39,12 @@ public class AntiRotService {
         this.promptMaxChars = promptMaxChars;
     }
 
+    /**
+     * 扫描租户已发布资产的腐化风险并写入 finding（不修改资产）。
+     *
+     * @param currentModel 可选；用于 MODEL_INCOMPATIBLE 检测
+     * @return 扫描后租户全部 finding（含历史 OPEN）
+     */
     public List<Map<String, Object>> scan(String tenant, String currentModel, String actor) {
         List<VersionedAsset> assets = registry.list(tenant);
         Map<String, List<VersionedAsset>> hashes = new HashMap<>();
@@ -82,6 +88,7 @@ public class AntiRotService {
         return findings(tenant);
     }
 
+    /** @return 租户 anti-rot finding 列表，按检测时间降序 */
     public List<Map<String, Object>> findings(String tenant) {
         return jdbc.queryForList("SELECT * FROM anti_rot_finding WHERE tenant_id=?"
                 + " ORDER BY detected_at DESC", tenant);

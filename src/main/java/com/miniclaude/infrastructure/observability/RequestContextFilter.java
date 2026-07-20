@@ -12,14 +12,30 @@ import java.io.IOException;
 import java.util.UUID;
 
 /**
- * 在 HTTP 请求边界设置并清理治理追踪上下文。
+ * HTTP 请求边界的治理追踪上下文过滤器（SLF4J MDC）。
  *
- * <p>traceId、tenantId、runId 用于把策略、评测、审计和发布操作关联起来；请求正文和敏感值
- * 不进入 MDC/指标标签，避免秘密泄漏与高基数指标爆炸。finally 清理是线程池安全要求：
- * 若遗留 MDC，复用同一工作线程的下个租户可能继承错误上下文并污染日志取证。</p>
+ * <p><b>写入 MDC 的维度</b>：
+ * <ul>
+ *   <li>{@code traceId}：全链路追踪；客户端可经 {@code X-Trace-Id} 传入，否则自动生成 UUID</li>
+ *   <li>{@code tenantId}：租户；默认 {@code default}，供策略/审计/multi-tenant 日志关联</li>
+ *   <li>{@code runId}：可选，关联 Durable Run（{@code X-Run-Id}）</li>
+ * </ul></p>
+ *
+ * <p><b>刻意不写入 MDC 的内容</b>：请求体、API Key、PII——避免日志泄密与高基数 Prometheus 标签。
+ * 指标计数见 {@link com.miniclaude.infrastructure.governance.DeterministicPolicyEngine}。</p>
+ *
+ * <p><b>finally 清理的必要性</b>：Servlet 容器复用线程；若异常路径不 {@code MDC.remove}，
+ * 下一请求可能继承错误 tenantId，导致审计串租户——属于 silent data corruption 类缺陷。</p>
+ *
+ * <p>Bean 名 {@code governanceMdcFilter} 便于与其他 Filter 排序配置区分。</p>
  */
 @Component("governanceMdcFilter")
 public class RequestContextFilter extends OncePerRequestFilter {
+    /**
+     * 每个 HTTP 请求：注入 MDC → 执行链 → finally 清理 MDC。
+     *
+     * <p>同时将 traceId 写回响应头，便于客户端与后端日志关联。</p>
+     */
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain chain) throws ServletException, IOException {
@@ -28,7 +44,9 @@ public class RequestContextFilter extends OncePerRequestFilter {
         String runId = headerOr(request, "X-Run-Id", "");
         MDC.put("traceId", traceId);
         MDC.put("tenantId", tenantId);
+        // runId 为空时不写入 MDC，避免无 Run 的 Chat 请求产生空标签
         if (!runId.isEmpty()) MDC.put("runId", runId);
+        // 回写响应头，客户端无需解析日志即可拿到 traceId
         response.setHeader("X-Trace-Id", traceId);
         try {
             chain.doFilter(request, response);
@@ -40,6 +58,13 @@ public class RequestContextFilter extends OncePerRequestFilter {
         }
     }
 
+    /**
+     * 读取请求头，空白/null 时返回 fallback。
+     *
+     * @param request  当前请求
+     * @param name     头名称
+     * @param fallback 缺省值（非 null）
+     */
     private static String headerOr(HttpServletRequest request, String name, String fallback) {
         String value = request.getHeader(name);
         return value == null || value.trim().isEmpty() ? fallback : value.trim();

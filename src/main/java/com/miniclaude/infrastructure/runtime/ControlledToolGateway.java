@@ -9,13 +9,18 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 工具白名单注册与路由适配器。
+ * 工具调用白名单网关（{@link ToolGateway} 的路由/registry 实现）。
  *
- * <p>只有进程内明确注册的工具才能执行，未命中时失败关闭，不提供名称猜测或默认工具。
- * 路由表支持并发读写；重复注册会替换同名路由。
+ * <p><b>Harness-first 约束</b>：Agent 引擎只能调用启动时 {@link #register} 的工具名。
+ * 未注册名称直接 {@link IllegalStateException}（fail-closed），<b>禁止</b>按名称猜测、
+ * 反射加载或默认回退到 shell——否则策略引擎与沙箱边界可被绕过。</p>
+ *
+ * <p><b>与 {@link ControlledModelGateway} 对称</b>：模型与工具均采用「显式登记、默认拒绝」
+ * 路由模式，符合 {@code docs/overview.md} 控制面包住概率模型的原则。</p>
  */
 @Component
 public class ControlledToolGateway implements ToolGateway {
+    /** 工具名 → 实际网关实现；{@link ConcurrentHashMap} 支持运行时注册与并发读 */
     private final Map<String, ToolGateway> routes = new ConcurrentHashMap<>();
 
     /**

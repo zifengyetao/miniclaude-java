@@ -71,12 +71,18 @@ public final class RegulatedScenarioCatalog {
         packs.put(id, pack);
     }
 
+    /**
+     * @param id 场景 ID：{@link #INVESTIGATION} 或 {@link #TRADING}
+     * @return 不可变 RolePack
+     * @throws IllegalArgumentException 未知场景
+     */
     public RolePack get(String id) {
         RolePack pack = packs.get(id);
         if (pack == null) throw new IllegalArgumentException("regulated scenario not found: " + id);
         return pack;
     }
 
+    /** @return 全部受监管 RolePack 的不可变列表 */
     public List<RolePack> list() {
         return Collections.unmodifiableList(new ArrayList<>(packs.values()));
     }

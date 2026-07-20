@@ -8,17 +8,30 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 一个可复现、可审计的场景角色包。
- *
- * <p>RolePack 描述“由谁、按什么流程、受哪些约束执行”：agentSpec 定义角色，
- * GraphSpec 定义节点及流转顺序，rules/skills/verifiers/evalSuite 则固定安全规则、
- * 能力、验证器和评测集。所有引用都要求精确版本，避免同一次场景在依赖漂移后
- * 得到不可复现的行为。</p>
+ * 可复现、可审计的场景角色包（Scenario 编排单元）。
+ * <p>
+ * <b>为何放在 domain：</b>绑定 agentSpec、Graph、规则/技能/验证器/评测集的<b>精确版本</b>，
+ * 是场景 Catalog 的核心领域模型。
+ * <p>
+ * <b>不变量：</b>
+ * <ul>
+ *   <li>所有 VersionRef 禁止 latest/通配符/版本区间。</li>
+ *   <li>rules/skills/verifiers 列表非空；evalSuite 非 null。</li>
+ *   <li>graph 非 null，且应通过 {@link com.miniclaude.domain.graph.GraphValidator}。</li>
+ * </ul>
+ * <p>
+ * <b>边界：</b>application {@code ScenarioCatalog} 静态定义；infrastructure 不修改 RolePack 语义。
  */
 public final class RolePack {
-    /** 指向一个不可漂移的版本化依赖；禁止 latest、通配符和版本区间。 */
+
+    /**
+     * 指向不可漂移的版本化依赖。
+     * <p>格式约定：key + 精确 version，由 Registry 解析为 {@link com.miniclaude.domain.governance.VersionedAsset}。
+     */
     public static final class VersionRef {
+        /** 资产/定义键。 */
         private final String key;
+        /** 精确版本号（非 latest）。 */
         private final String version;
 
         public VersionRef(String key, String version) {
@@ -26,18 +39,29 @@ public final class RolePack {
             this.version = exact(version);
         }
 
+        /** @return 键 */
         public String getKey() { return key; }
+        /** @return 精确版本 */
         public String getVersion() { return version; }
     }
 
+    /** RolePack 唯一 ID。 */
     private final String id;
+    /** 展示名称。 */
     private final String name;
+    /** RolePack 自身版本。 */
     private final String version;
+    /** 绑定的 Agent 规格引用。 */
     private final VersionRef agentSpec;
+    /** 场景执行图（节点/边/limits）。 */
     private final GraphSpec graph;
+    /** 策略规则资产引用列表（非空）。 */
     private final List<VersionRef> rules;
+    /** 技能资产引用列表（非空）。 */
     private final List<VersionRef> skills;
+    /** 验证器资产引用列表（非空）。 */
     private final List<VersionRef> verifiers;
+    /** 评测集引用（进化/发布 gate）。 */
     private final VersionRef evalSuite;
 
     public RolePack(String id, String name, String version, VersionRef agentSpec, GraphSpec graph,
@@ -54,15 +78,15 @@ public final class RolePack {
         this.evalSuite = Objects.requireNonNull(evalSuite, "evalSuite");
     }
 
+    /** 复制并冻结 VersionRef 列表；空列表拒绝（场景不得无约束执行）。 */
     private static List<VersionRef> immutable(List<VersionRef> value) {
-        // why：场景包缺少任一类约束都不应退化为“无约束执行”，因此空引用直接失败。
         if (value == null || value.isEmpty()) throw new IllegalArgumentException("version refs required");
         return Collections.unmodifiableList(new ArrayList<>(value));
     }
 
+    /** 拒绝动态版本，保证审计可复现。 */
     private static String exact(String value) {
         String normalized = text(value, "version");
-        // why：动态版本会让规则、验证器或评测集静默变化，破坏审计和结果复现。
         if ("latest".equalsIgnoreCase(normalized) || normalized.contains("*")
                 || normalized.contains("[") || normalized.contains("(")) {
             throw new IllegalArgumentException("exact version required");
@@ -75,13 +99,22 @@ public final class RolePack {
         return value.trim();
     }
 
+    /** @return ID */
     public String getId() { return id; }
+    /** @return 名称 */
     public String getName() { return name; }
+    /** @return 版本 */
     public String getVersion() { return version; }
+    /** @return Agent 规格引用 */
     public VersionRef getAgentSpec() { return agentSpec; }
+    /** @return 图定义 */
     public GraphSpec getGraph() { return graph; }
+    /** @return 规则引用列表 */
     public List<VersionRef> getRules() { return rules; }
+    /** @return 技能引用列表 */
     public List<VersionRef> getSkills() { return skills; }
+    /** @return 验证器引用列表 */
     public List<VersionRef> getVerifiers() { return verifiers; }
+    /** @return 评测集引用 */
     public VersionRef getEvalSuite() { return evalSuite; }
 }

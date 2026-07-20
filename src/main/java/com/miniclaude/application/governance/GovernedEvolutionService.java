@@ -53,6 +53,11 @@ public class GovernedEvolutionService {
                 .map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toSet());
     }
 
+    /**
+     * 记录经验观察（L0，不写候选）。
+     *
+     * @implNote 副作用：INSERT experience_observation + 审计
+     */
     public Map<String, Object> observe(String tenant, String sourceType, String sourceId,
                                        String traceId, String runId, String attribution,
                                        String summary, Map<String, Object> evidence, String actor) {
@@ -279,16 +284,19 @@ public class GovernedEvolutionService {
         return candidate(candidateId);
     }
 
+    /** @return 租户观察记录，按时间降序 */
     public List<Map<String, Object>> observations(String tenant) {
         return jdbc.queryForList("SELECT * FROM experience_observation WHERE tenant_id=?"
                 + " ORDER BY observed_at DESC", tenant);
     }
 
+    /** @return 租户进化候选，按创建时间降序 */
     public List<Map<String, Object>> candidates(String tenant) {
         return jdbc.queryForList("SELECT * FROM evolution_candidate WHERE tenant_id=?"
                 + " ORDER BY created_at DESC", tenant);
     }
 
+    /** @param id 候选主键 */
     public Map<String, Object> candidate(String id) {
         return jdbc.queryForMap("SELECT * FROM evolution_candidate WHERE id=?", id);
     }

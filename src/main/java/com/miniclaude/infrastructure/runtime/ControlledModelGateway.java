@@ -9,13 +9,17 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 显式注册、默认拒绝的模型路由适配器。
+ * 大模型调用白名单网关（{@link ModelGateway} 的路由实现）。
  *
- * <p>模型名只会路由到进程内明确登记的网关，不进行隐式供应商回退。路由表支持并发读写，
- * 但重复注册会覆盖旧值，注册生命周期应由启动配置控制。
+ * <p><b>为何默认拒绝</b>：防止配置错误或 Prompt 注入导致请求被路由到未评审的供应商/模型，
+ * 产生意外费用或数据出境。只有 {@link #register} 的模型名才会被 {@link #complete} 接受。</p>
+ *
+ * <p><b>无隐式 fallback</b>：与「OpenAI 兼容自动降级」不同，本类在 route miss 时
+ * 直接失败，迫使部署显式声明可用模型列表。</p>
  */
 @Component
 public class ControlledModelGateway implements ModelGateway {
+    /** 模型名 → 供应商网关；并发安全，重复 register 覆盖旧路由 */
     private final Map<String, ModelGateway> routes = new ConcurrentHashMap<>();
 
     /**

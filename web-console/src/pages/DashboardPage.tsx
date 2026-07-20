@@ -1,6 +1,14 @@
 /**
- * 平台工作台并行汇总数字员工、运行和治理资产，提供只读概览与导航入口。
- * 指标是普通 API 返回的加载时快照，不代表 SSE 实时监控或安全审计结论。
+ * 平台工作台：并行汇总数字员工、运行和治理资产，提供只读概览与导航入口。
+ *
+ * API 调用意图：
+ * - platformApi.agents.list / runs.list / governanceApi.assets 三路并行，减少首屏等待
+ *
+ * 派生指标（客户端计算，非服务端聚合）：
+ * - active：status 为 RUNNING/PLANNING/VERIFYING 的运行数
+ * - succeeded：status === SUCCEEDED 的运行数
+ *
+ * 限制：指标是普通 API 返回的加载时快照，不代表 SSE 实时监控或安全审计结论。
  */
 import { ArrowRight, Bot, CheckCircle2, Clock3, PlayCircle } from 'lucide-react'
 import { Link } from 'react-router-dom'
@@ -13,6 +21,7 @@ export function DashboardPage() {
     const [agents, runs, assets] = await Promise.all([platformApi.agents.list(), platformApi.runs.list(), governanceApi.assets()])
     return { agents, runs, assets }
   })
+  // 边界：未加载完成时 data 为 null，用 ?? [] 避免 filter 抛错。
   const active = state.data?.runs.filter((run) => ['RUNNING', 'PLANNING', 'VERIFYING'].includes(run.status)) ?? []
   const succeeded = state.data?.runs.filter((run) => run.status === 'SUCCEEDED').length ?? 0
 
@@ -26,6 +35,7 @@ export function DashboardPage() {
         <article><span>治理资产</span><strong>{state.data?.assets.length ?? 0}</strong><small>{state.data?.assets.filter((asset) => asset.status === 'PUBLISHED').length ?? 0} 个已发布</small></article>
       </section>
       <div className="dashboard-grid">
+        {/* 最近运行：slice(0,6) 仅 UI 截断，完整列表见 /tasks。 */}
         <section className="panel"><header><div><h2>最近运行</h2><p>持久化运行的实时状态</p></div><Link to="/tasks">查看全部</Link></header><div className="rows">{state.data?.runs.slice(0, 6).map((run) => <article className="run-row" key={run.id}><span className={`status-icon ${run.status.toLowerCase()}`}>{run.status === 'SUCCEEDED' ? <CheckCircle2 size={17} /> : run.status === 'RUNNING' ? <PlayCircle size={17} /> : <Clock3 size={17} />}</span><div><strong>{run.goal}</strong><small>{run.executionMode} · {run.currentStep}/{run.maxSteps} 步</small></div><span className="tag">{run.status}</span></article>)}</div></section>
         <section className="panel"><header><div><h2>数字员工</h2><p>实际平台注册定义</p></div><Link to="/employees">管理</Link></header><div className="rows">{state.data?.agents.slice(0, 5).map((agent) => <article className="agent-row" key={agent.id}><span className="agent-icon"><Bot size={18} /></span><div><strong>{agent.name}</strong><small>{agent.roleName} · v{agent.version}</small></div><span className="tag">{agent.status}</span></article>)}</div></section>
       </div>

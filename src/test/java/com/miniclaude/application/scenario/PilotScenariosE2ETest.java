@@ -45,6 +45,7 @@ class PilotScenariosE2ETest {
     @Autowired ObjectMapper json;
     @Autowired DurableStores.ApprovalService approvals;
 
+    /** GET /scenarios/templates 应返回 3 个版本 pinned 的 RolePack。 */
     @Test
     void exposesThreePreciselyVersionedValidTemplates() throws Exception {
         mvc.perform(get("/api/v1/scenarios/templates"))
@@ -55,6 +56,7 @@ class PilotScenariosE2ETest {
                 .andExpect(jsonPath("$[0].graph.entryNode").isNotEmpty());
     }
 
+    /** coding-agent 成功时应产出 PATCH_PROPOSAL/PR_DRAFT 且 externalPrCreated=false。 */
     @Test
     void codingAgentCompletesWithFakePatchAndPrDraft() throws Exception {
         String body = "{\"workspace\":\"" + escape(WORKSPACE.toString())
@@ -70,6 +72,7 @@ class PilotScenariosE2ETest {
                         org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString("\"externalPrCreated\":false"))));
     }
 
+    /** main 分支与 --no-verify 类 goal 应 FAILED，阻断绕过审查链。 */
     @Test
     void codingAgentBlocksMainAndBypassFlags() throws Exception {
         // why：主分支直写和 --no-verify 都会绕开 Coding 场景的隔离审查链，必须失败。
@@ -81,6 +84,7 @@ class PilotScenariosE2ETest {
         assertThat(bypass.get("status").asText()).isEqualTo("FAILED");
     }
 
+    /** 只读 SQL 成功生成 REPORT；多语句含 DELETE 应 FAILED。 */
     @Test
     void analystCompletesReadOnlyReportAndBlocksUnsafeSql() throws Exception {
         JsonNode success = start("data-analyst",
@@ -98,6 +102,7 @@ class PilotScenariosE2ETest {
         assertThat(blocked.get("status").asText()).isEqualTo("FAILED");
     }
 
+    /** 高成本查询 WAITING_APPROVAL，人工批准 continue 后 SUCCEEDED。 */
     @Test
     void expensiveAnalyticsStopsAtApprovalThenContinues() throws Exception {
         // fake 成本估算稳定触发人工审批；获批前查询节点不会执行。
@@ -113,6 +118,7 @@ class PilotScenariosE2ETest {
                 .andExpect(jsonPath("$.status").value("SUCCEEDED"));
     }
 
+    /** 客服场景 PII 掩码、永不 sent；高敏意图转 HUMAN_SUPPORT_HANDOFF 审批。 */
     @Test
     void supportMasksPiiNeverSendsAndHandsSensitiveIntentToHuman() throws Exception {
         // 正常路径也只能形成未发送草稿，且原始邮箱不能进入持久化制品。

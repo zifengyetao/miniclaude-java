@@ -17,11 +17,21 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * 基于关系数据库的本地持久编排器。
+ * 基于 JDBC 的<b>默认本地持久编排器</b>（{@link DurableOrchestrator}）。
  *
- * <p>每个公开转换都在事务内同时更新运行聚合、追加事实并按需保存 checkpoint，
- * 避免调用方观察到“状态已推进但恢复依据未落库”的半完成结果。幂等键处理传输重试，
- * 运行版本处理并发写竞争；两者任一校验失败都停止推进。</p>
+ * <p><b>激活条件</b>：{@code platform.orchestrator=local} 或未配置（{@code matchIfMissing=true}）。
+ * 这是 {@code docs/overview.md} 所述默认拓扑：Flyway 表 + 单 JVM 事务，无 Temporal 依赖。</p>
+ *
+ * <p><b>核心不变量</b>：
+ * <ul>
+ *   <li>每次状态转换在 {@code @Transactional} 内同时更新 {@code agent_run}、
+ *       追加 {@code run_event}、必要时写 {@code run_checkpoint}</li>
+ *   <li>幂等键（{@code key}）去重 HTTP/消息重试；乐观锁 {@code version} 处理并发写</li>
+ *   <li>预算/步数/墙钟超时在 {@link #recordStep} 重新判定，防重启绕过内存计数</li>
+ *   <li>从 {@link AgentRun.Status#WAITING_APPROVAL} 恢复须存在 APPROVED 且无 PENDING</li>
+ * </ul></p>
+ *
+ * <p><b>与 Temporal 版对比</b>：本类可直接写库；Temporal 版须经 Activity。禁止两 Bean 同时 active。</p>
  */
 @Service
 @ConditionalOnProperty(name = "platform.orchestrator", havingValue = "local", matchIfMissing = true)
@@ -30,6 +40,7 @@ public class LocalDurableOrchestrator implements DurableOrchestrator {
     private final DurableStores.RunEventStore events;
     private final DurableStores.CheckpointStore checkpoints;
     private final DurableStores.ApprovalService approvals;
+    /** 用于乐观锁 UPDATE 与审批计数查询 */
     private final JdbcTemplate jdbc;
 
     public LocalDurableOrchestrator(AgentRunRepository runs, DurableStores.RunEventStore events,
@@ -186,6 +197,12 @@ public class LocalDurableOrchestrator implements DurableOrchestrator {
         return update(run, target, run.getCurrentStep(), run.getCostUsd(), tenantId, key, event);
     }
 
+    /**
+     * 乐观锁 + 事件追加的核心更新路径。
+     *
+     * <p>先查幂等键是否已存在事件，存在则短路返回当前 Run（重试安全）。
+     * UPDATE 带 {@code version=?}，失败抛 conflict，避免覆盖并发写入。</p>
+     */
     private AgentRun update(AgentRun run, AgentRun.Status status, int step, BigDecimal cost,
                             String tenantId, String key, String eventType) {
         // 先按幂等键短路常规重试；数据库唯一约束仍是并发重试下的最终防线。
@@ -204,6 +221,7 @@ public class LocalDurableOrchestrator implements DurableOrchestrator {
         return required(tenantId, run.getId());
     }
 
+    /** 加载 Run 并校验 tenantId，跨租户统一 not found */
     private AgentRun required(String tenantId, String runId) {
         AgentRun run = runs.findById(runId)
                 .orElseThrow(() -> new IllegalArgumentException("run not found: " + runId));
@@ -212,11 +230,13 @@ public class LocalDurableOrchestrator implements DurableOrchestrator {
         return run;
     }
 
+    /** 事件表是否已有相同幂等键（编排层重试检测） */
     private boolean replayed(String tenantId, String runId, String key) {
         return events.findEvents(tenantId, runId).stream()
                 .anyMatch(event -> event.getIdempotencyKey().equals(key));
     }
 
+    /** 终态集合：到达后大部分转换拒绝（cancel 对部分终态幂等） */
     private boolean terminal(AgentRun.Status status) {
         return status == AgentRun.Status.SUCCEEDED || status == AgentRun.Status.FAILED
                 || status == AgentRun.Status.CANCELLED || status == AgentRun.Status.TIMED_OUT
@@ -224,6 +244,7 @@ public class LocalDurableOrchestrator implements DurableOrchestrator {
                 || status == AgentRun.Status.STEP_LIMIT_EXCEEDED;
     }
 
+    /** 最小 JSON 字符串转义，用于 failure checkpoint 内嵌 reason */
     private static String jsonEscape(String value) {
         return value.replace("\\", "\\\\").replace("\"", "\\\"");
     }

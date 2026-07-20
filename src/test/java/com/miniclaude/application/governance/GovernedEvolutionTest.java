@@ -39,6 +39,7 @@ class GovernedEvolutionTest {
     @Autowired ReleaseManifestService manifests;
     @Autowired JdbcTemplate jdbc;
 
+    /** 提案不得直接修改已发布资产内容或数量；候选状态为 PROPOSED。 */
     @Test
     void proposerCannotSelfModifyProduction() {
         Fixture f = fixture("no-self-modify", VersionedAsset.Type.PROMPT, "stable", "base");
@@ -54,6 +55,7 @@ class GovernedEvolutionTest {
         assertThat(text(candidate, "PARENT_ASSET_VERSION")).isEqualTo(f.asset.getVersion());
     }
 
+    /** L2 候选仅绑定 owner 可 review 通过；错误 principal 应 IllegalArgumentException。 */
     @Test
     void l2RequiresAssignedOwnerApproval() {
         Fixture f = fixture("l2-owner", VersionedAsset.Type.PROMPT, "owned", "base");
@@ -71,6 +73,7 @@ class GovernedEvolutionTest {
                 .isEqualTo("REVIEWED");
     }
 
+    /** L3 自动 promote 仅限 allowlist 内低风险 PROMPT；RULE/PERMISSION 不得自动晋升。 */
     @Test
     void l3AutoPromotionIsRestrictedToAllowlistedLowRiskPromptOrSkill() {
         Fixture allowed = fixture("l3-allowed", VersionedAsset.Type.PROMPT, "auto-prompt", "base");
@@ -113,6 +116,7 @@ class GovernedEvolutionTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
+    /** proposer 与 evaluator 必须分离；patch 不得泄漏 holdout vault 引用。 */
     @Test
     void proposerAndEvaluatorAreSeparatedAndHiddenContentIsIsolated() {
         Fixture f = fixture("hidden", VersionedAsset.Type.PROMPT, "hidden-safe", "base");
@@ -134,6 +138,7 @@ class GovernedEvolutionTest {
                 + " WHERE candidate_id=?", Integer.class, id)).isEqualTo(1);
     }
 
+    /** rollback 后 promoted 版本 REVOKED，父版本保持 PUBLISHED。 */
     @Test
     void rollbackRevokesPromotedVersionAndRestoresStableParent() {
         Fixture f = fixture("rollback", VersionedAsset.Type.PROMPT, "auto-prompt", "base");
@@ -152,6 +157,7 @@ class GovernedEvolutionTest {
                 .isEqualTo(VersionedAsset.Status.PUBLISHED);
     }
 
+    /** anti-rot scan 只产生 findings，不删除或降级已发布资产。 */
     @Test
     void antiRotOnlyCreatesFindingsAndNeverDeletesAssets() {
         String tenant = "anti-rot";

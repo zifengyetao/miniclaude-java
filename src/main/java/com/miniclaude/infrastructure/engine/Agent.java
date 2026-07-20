@@ -35,36 +35,114 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
- * Agent 核心循环。
+ * Agent 核心循环引擎 —— LLM 多轮对话与工具调用的状态机实现。
  *
- * <p>职责：驱动 LLM 多轮对话与工具调用，支持 Anthropic Messages API 与 OpenAI 兼容后端
- *（含 Kimi/Moonshot）、流式输出、四层上下文压缩、计划模式、子 Agent、MCP、
- * Memory prefetch、/goal、/loop、Auto Mode 与预算控制。
+ * <h2>职责</h2>
+ * <ul>
+ *   <li>接收用户消息，维护完整对话历史（Anthropic Messages 或 OpenAI Chat Completions 格式）</li>
+ *   <li>流式调用 LLM，解析 {@code tool_use} / {@code tool_calls}，本地或远程执行工具并回传结果</li>
+ *   <li>上下文多层压缩、Memory 预取注入、预算/轮次控制、权限校验与子 Agent fork</li>
+ *   <li>REPL 扩展命令：{@code /goal}、{@code /loop}、{@code compact}、{@code clear} 等</li>
+ * </ul>
+ *
+ * <h2>双后端（Anthropic / OpenAI 兼容）</h2>
+ * <ul>
+ *   <li><b>Anthropic 路径</b>（{@code useOpenAI=false}）：Messages API + content block 格式；
+ *       支持 prefix caching（{@link #buildAnthropicSystem}、{@link #withCacheBreakpoints}）、
+ *       extended thinking；主循环见 {@link #chatAnthropic}。</li>
+ *   <li><b>OpenAI 兼容路径</b>（{@code useOpenAI=true}，含 Kimi/Moonshot）：Chat Completions +
+ *       {@code role=tool} 消息；Kimi 内置 {@code $web_search} 需 arguments 原样 echo，
+ *       见 {@link #chatOpenAI}。</li>
+ *   <li>构建时由 {@code apiBase} 是否非空决定后端；API Key 从参数或环境变量解析。</li>
+ * </ul>
+ *
+ * <h2>上下文压缩（四层 pipeline）</h2>
+ * <ol>
+ *   <li><b>粗粒度 compact</b>（{@link #checkAndCompact}）：窗口利用率 &gt; 85% 时 LLM 摘要折叠旧消息</li>
+ *   <li><b>budgetToolResults</b>：高利用率时截断过长 tool result（保留头尾）</li>
+ *   <li><b>snipStaleResults</b>：对可裁剪工具（read_file 等）的旧结果替换占位符</li>
+ *   <li><b>microcompact</b>：API 调用空闲 5 分钟后，将更早的 tool result 清空为 {@code [Old result cleared]}</li>
+ * </ol>
+ * 每轮 API 请求前由 {@link #runCompressionPipeline} 依次执行后三层。
+ *
+ * <h2>MCP（Model Context Protocol）</h2>
+ * 主 Agent 首次 {@link #chat} 时 {@link McpClient.McpManager#loadAndConnect()}，
+ * 将 MCP 工具定义合并进 {@link #tools}；执行时 {@link #executeToolCall} 路由到 MCP。
+ * {@link #close} 断开连接。
+ *
+ * <h2>Memory 预取</h2>
+ * 每轮用户消息触发 {@link #startMemoryPrefetchForTurn} 异步检索 MEMORY.md 相关片段；
+ * 下一轮循环内 {@link #consumeMemoryPrefetchIfReady} 注入到最后一条 user 消息（仅消费一次）。
+ * 子 Agent 跳过 Memory 以避免嵌套膨胀。
+ *
+ * <h2>/goal 目标追踪</h2>
+ * {@link #setGoal} 激活 session 级停止条件；{@link #pursueGoal} 在每次 {@link #chat} 后
+ * 用独立 evaluator LLM（{@link #evaluateGoal}）判定是否达成/不可能，未达成则继续驱动 Agent。
+ * {@link #stopGoal} / {@link #abort} 可中断。
+ *
+ * <h2>/loop 循环调度</h2>
+ * <ul>
+ *   <li><b>interval 模式</b>（{@link #runLoopInterval}）：固定间隔重复 {@link #chat}</li>
+ *   <li><b>dynamic 模式</b>（{@link #runLoopDynamic}）：模型通过 {@code schedule_wakeup} 工具自调度下一 tick</li>
+ * </ul>
+ * 均受 {@link #maxTurns}、{@link #maxCostUsd}、{@link Autonomy#LOOP_MAX_ITERATIONS} 约束。
+ *
+ * <h2>Auto Mode 权限分类</h2>
+ * {@code permissionMode=auto} 时，{@link #classifyToolCall} 用 LLM 两阶段分类器
+ *（{@link Autonomy}）决定 allow/deny；连续/累计拒绝达上限后回退人工确认（{@link #autoFallback}）。
+ * 只读工具可走 {@link Autonomy#AUTO_MODE_FAST_PATH_TOOLS} 快速放行。
+ *
+ * <h2>子 Agent fork</h2>
+ * {@code agent} 工具（{@link #executeAgentTool}）与 {@code skill} fork 上下文
+ *（{@link #executeSkillTool}）通过 {@link Builder#isSubAgent(boolean)} 创建轻量实例：
+ * 静默 UI、费用汇总到父 Agent、权限模式见 {@link #childPermissionMode}。
  *
  * <p>在系统中的位置：{@code infrastructure/engine} 层核心，
- * 由 {@link CliMain} 构建并驱动；子 Agent 由本类 fork 轻量实例。
- * 对应 Python {@code agent.py} 的 Java 11 移植。
+ * 由 {@link CliMain} 构建并驱动。对应 Python {@code agent.py} 的 Java 11 移植。
+ *
+ * @see CliMain
+ * @see Tools
+ * @see Autonomy
+ * @see Memory
  */
 public class Agent {
 
-    /** 危险操作确认回调（CLI 提供 y/n 交互）。 */
+    /**
+     * 危险操作确认回调（CLI 提供 y/n 交互）。
+     * <p>当 {@link Tools#checkPermission} 返回 {@code action=confirm} 时调用。
+     */
     @FunctionalInterface
     public interface ConfirmFn {
+        /**
+         * @param message 待确认的操作描述（如 shell 命令）
+         * @return {@code true} 允许执行，{@code false} 拒绝
+         */
         boolean confirm(String message);
     }
 
-    /** 计划模式退出时的审批回调（返回 choice / feedback）。 */
+    /**
+     * 计划模式退出时的审批回调。
+     * <p>用户审阅 plan 文件后返回 choice（execute / keep-planning 等）与可选 feedback。
+     */
     @FunctionalInterface
     public interface PlanApprovalFn {
+        /**
+         * @param planContent 计划文件全文
+         * @return 含 {@code choice}、可选 {@code feedback} 的 Map
+         */
         Map<String, String> approve(String planContent);
     }
 
+    /** Gson 单例，用于 JSON 序列化/反序列化及消息深拷贝。 */
     private static final Gson GSON = new Gson();
+    /** {@code Map<String, Object>} 的 TypeToken，供 Gson 泛型解析。 */
     private static final java.lang.reflect.Type MAP_TYPE =
             new TypeToken<Map<String, Object>>() {}.getType();
+    /** {@code List<Map<String, Object>>} 的 TypeToken，供消息列表深拷贝。 */
     private static final java.lang.reflect.Type LIST_MAP_TYPE =
             new TypeToken<List<Map<String, Object>>>() {}.getType();
 
+    /** 已知模型的上下文窗口 token 上限（未列出的模型走启发式默认值）。 */
     private static final Map<String, Integer> MODEL_CONTEXT;
     static {
         Map<String, Integer> m = new HashMap<>();
@@ -75,7 +153,7 @@ public class Agent {
         m.put("claude-opus-4-20250514", 200000);
         m.put("gpt-4o", 128000);
         m.put("gpt-4o-mini", 128000);
-        // Kimi / Moonshot (OpenAI-compatible)
+        // Kimi / Moonshot（OpenAI 兼容后端）
         m.put("kimi-k2.5", 262144);
         m.put("kimi-k2.6", 262144);
         m.put("kimi-k2.7-code", 262144);
@@ -87,80 +165,138 @@ public class Agent {
         MODEL_CONTEXT = Collections.unmodifiableMap(m);
     }
 
+    /** 可被 snip（替换为占位符）的旧 tool result 对应工具名集合。 */
     private static final Set<String> SNIPPABLE_TOOLS = setOf(
             "read_file", "grep_search", "list_files", "run_shell");
+    /** snip 后写入 tool result 的占位文本，提示模型必要时重新读取。 */
     private static final String SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]";
+    /** 触发 snip 的上下文利用率下限（lastInputTokenCount / effectiveWindow）。 */
     private static final double SNIP_THRESHOLD = 0.60;
+    /** 缓存仍「热」时提高 snip 门槛，避免刚命中 cache 就裁剪。 */
     private static final double SNIP_HOT_OVERRIDE = 0.75;
+    /** 距上次 API 调用超过此秒数才允许 microcompact（5 分钟）。 */
     private static final long MICROCOMPACT_IDLE_S = 5 * 60;
+    /** snip/microcompact 时始终保留的最近 tool result 条数。 */
     private static final int KEEP_RECENT_RESULTS = 3;
 
     // ─── 实例字段 ─────────────────────────────────────────────────
 
+    /** 权限模式：default / plan / auto / acceptEdits / bypassPermissions / yolo 等。 */
     public String permissionMode;
+    /** 是否启用 extended thinking（构造时解析为 thinkingMode）。 */
     public final boolean thinking;
+    /** LLM 模型 ID（如 claude-opus-4-6、kimi-k2.5）。 */
     public final String model;
+    /** {@code true} 走 OpenAI 兼容 API；{@code false} 走 Anthropic Messages API。 */
     public final boolean useOpenAI;
+    /** 子 Agent 实例：静默 UI、不自动 save、不初始化 MCP/Memory。 */
     public final boolean isSubAgent;
+    /** 当前可用工具定义列表（含 MCP 动态合并项）。 */
     public List<Map<String, Object>> tools;
+    /** 可选美元预算上限；{@code null} 表示不限制。 */
     public final Double maxCostUsd;
+    /** 可选工具轮次上限；{@code null} 表示不限制。 */
     public final Integer maxTurns;
+    /** 危险操作确认回调；{@code null} 时回退 stdin y/n。 */
     public ConfirmFn confirmFn;
+    /** 有效上下文窗口 = 模型窗口 - 20000 安全余量。 */
     public final int effectiveWindow;
+    /** 8 位 hex 会话 ID，用于 plan 文件与 session 持久化。 */
     public final String sessionId;
+    /** 会话启动 ISO 时间戳。 */
     public final String sessionStartTime;
 
+    /** 累计计费 input tokens（不含 cache read 重复计费部分）。 */
     public int totalInputTokens;
+    /** 累计 output tokens。 */
     public int totalOutputTokens;
+    /** 累计 cache read input tokens。 */
     public int totalCacheReadTokens;
+    /** 累计 cache creation input tokens。 */
     public int totalCacheCreationTokens;
+    /** 上一轮 API 请求的近似 input token 数，驱动压缩 pipeline。 */
     public int lastInputTokenCount;
+    /** 已完成的工具轮次数（每批 tool_calls 计 1 turn）。 */
     public int currentTurns;
+    /** 上次 API 调用完成时的 Unix 时间戳（秒），供 microcompact 与 /loop 使用。 */
     public double lastApiCallTime;
 
+    /** 当前 /goal 状态 Map（condition、iterations、started_at、last_reason）；{@code null} 无目标。 */
     public Map<String, Object> activeGoal;
+    /** /goal 追踪中断标志（{@link #stopGoal} / {@link #abort} 置位）。 */
     public volatile boolean goalStop;
+    /** dynamic /loop 模式下模型 schedule_wakeup 写入的下一 tick 参数。 */
     public Map<String, Object> pendingWakeup;
+    /** /loop 循环中断标志。 */
     public volatile boolean loopStop;
+    /** dynamic /loop 期间为 {@code true}，允许 schedule_wakeup 工具。 */
     public boolean scheduleWakeupEnabled;
 
+    /** Auto Mode 连续拒绝计数，达上限回退人工确认。 */
     public int autoConsecutiveDenials;
+    /** Auto Mode 会话累计拒绝总数。 */
     public int autoTotalDenials;
 
+    /** 用户 Ctrl+C / {@link #abort} 置位，主循环各阶段检测后退出。 */
     private final AtomicBoolean aborted = new AtomicBoolean(false);
+    /** 是否正在执行 {@link #chat}（供 SIGINT 判断是否可 abort）。 */
     private final AtomicBoolean processing = new AtomicBoolean(false);
 
+    /** 本会话已确认过的危险操作 message，避免重复弹窗（非 auto 模式）。 */
     private final Set<String> confirmedPaths = ConcurrentHashMap.newKeySet();
+    /** 进入 plan 模式前保存的 permissionMode，退出时恢复。 */
     private String prePlanMode;
+    /** plan 模式专用 Markdown 计划文件绝对路径。 */
     private String planFilePath;
+    /** 计划审阅回调；{@code null} 时 exit_plan_mode 仅恢复模式。 */
     private PlanApprovalFn planApprovalFn;
+    /** 某工具触发「清空上下文」后置位，下一轮将 tool 结果作为新 user 消息。 */
     private boolean contextCleared;
 
+    /** 解析后的 thinking 模式：disabled / enabled / adaptive。 */
     private final String thinkingMode;
+    /** 子 Agent {@link #runOnce} 时收集 assistant 文本，替代直接打印 UI。 */
     private List<String> outputBuffer;
 
+    /** read_file 工具的行偏移状态（path → 上次读取位置）。 */
     private final Map<String, Long> readFileState = new HashMap<>();
 
+    /** MCP 连接与工具调用管理器。 */
     private final McpClient.McpManager mcpManager = new McpClient.McpManager();
+    /** 主 Agent 是否已完成 MCP 初始化（仅首次 chat 加载）。 */
     private boolean mcpInitialized;
 
+    /** 本会话已注入过的 Memory 文件路径，避免重复注入。 */
     private final Set<String> alreadySurfacedMemories = new HashSet<>();
+    /** 本会话已注入 Memory 内容的字节累计，用于 prefetch 预算。 */
     private int sessionMemoryBytes;
+    /** 当前轮异步 Memory 预取任务；{@code null} 表示无进行中的预取。 */
     private Memory.MemoryPrefetch memoryPrefetch;
 
+    /** Anthropic Messages API 格式的对话历史。 */
     private final List<Map<String, Object>> anthropicMessages = new ArrayList<>();
+    /** OpenAI Chat Completions 格式的对话历史（首条通常为 system）。 */
     private final List<Map<String, Object>> openaiMessages = new ArrayList<>();
 
+    /** 首条 user 消息附带的 CLAUDE.md / 日期等提醒（Kimi 上并入 system）。 */
     private String userContextReminder = "";
+    /** 静态 system prompt（可缓存部分）。 */
     private String staticSystemPrompt;
+    /** 动态 system 上下文（项目路径、git 状态等）。 */
     private String dynamicSystemContext = "";
+    /** static + dynamic 合并后的 base prompt。 */
     private String baseSystemPrompt;
+    /** 当前生效的完整 system prompt（plan 模式含额外后缀）。 */
     private String systemPrompt;
 
+    /** OpenAI 兼容 API base URL；非空则启用 OpenAI 后端。 */
     private final String apiBase;
+    /** Anthropic API base URL（默认 api.anthropic.com）。 */
     private final String anthropicBaseUrl;
+    /** LLM API Key（Anthropic 或 OpenAI/Kimi）。 */
     private final String apiKey;
 
+    /** 只读工具并行执行的固定大小线程池（8 线程，daemon）。 */
     private final ExecutorService toolExecutor = Executors.newFixedThreadPool(8, r -> {
         Thread t = new Thread(r, "mini-claude-tool");
         t.setDaemon(true);
@@ -169,35 +305,66 @@ public class Agent {
 
     // ─── Builder 构建器 ───────────────────────────────────────────
 
-    /** 流式构建 {@link Agent} 实例。 */
+    /**
+     * 流式构建 {@link Agent} 实例的 Builder。
+     * <p>典型用法：{@code Agent.builder().model(...).apiKey(...).build()}
+     */
     public static final class Builder {
+        /** 默认权限模式。 */
         private String permissionMode = "default";
+        /** 默认 Anthropic 模型。 */
         private String model = "claude-opus-4-6";
+        /** OpenAI 兼容 base URL；非空启用 OpenAI 后端。 */
         private String apiBase;
+        /** Anthropic base URL。 */
         private String anthropicBaseUrl;
+        /** API Key。 */
         private String apiKey;
+        /** 是否启用 thinking。 */
         private boolean thinking;
+        /** 美元预算上限。 */
         private Double maxCostUsd;
+        /** 工具轮次上限。 */
         private Integer maxTurns;
+        /** 危险操作确认回调。 */
         private ConfirmFn confirmFn;
+        /** 自定义 system prompt（跳过 Prompt 默认构建）。 */
         private String customSystemPrompt;
+        /** 自定义工具列表（跳过 Tools.TOOL_DEFINITIONS）。 */
         private List<Map<String, Object>> customTools;
+        /** 是否为子 Agent。 */
         private boolean isSubAgent;
 
+        /** @param v 权限模式 */
         public Builder permissionMode(String v) { this.permissionMode = v; return this; }
+        /** @param v 模型 ID */
         public Builder model(String v) { this.model = v; return this; }
+        /** @param v OpenAI 兼容 API base URL */
         public Builder apiBase(String v) { this.apiBase = v; return this; }
+        /** @param v Anthropic API base URL */
         public Builder anthropicBaseUrl(String v) { this.anthropicBaseUrl = v; return this; }
+        /** @param v API Key */
         public Builder apiKey(String v) { this.apiKey = v; return this; }
+        /** @param v 是否启用 extended thinking */
         public Builder thinking(boolean v) { this.thinking = v; return this; }
+        /** @param v 美元预算上限 */
         public Builder maxCostUsd(Double v) { this.maxCostUsd = v; return this; }
+        /** @param v 工具轮次上限 */
         public Builder maxTurns(Integer v) { this.maxTurns = v; return this; }
+        /** @param v 危险操作确认回调 */
         public Builder confirmFn(ConfirmFn v) { this.confirmFn = v; return this; }
+        /** @param v 自定义 system prompt */
         public Builder customSystemPrompt(String v) { this.customSystemPrompt = v; return this; }
+        /** @param v 自定义工具定义列表 */
         public Builder customTools(List<Map<String, Object>> v) { this.customTools = v; return this; }
+        /** @param v 是否为子 Agent（静默 UI、不 save/MCP） */
         public Builder isSubAgent(boolean v) { this.isSubAgent = v; return this; }
 
-        /** 构建 Agent 实例。 */
+        /**
+         * 构建并初始化 Agent 实例。
+         *
+         * @return 配置完毕的 Agent
+         */
         public Agent build() {
             return new Agent(permissionMode, model, apiBase, anthropicBaseUrl, apiKey,
                     thinking, maxCostUsd, maxTurns, confirmFn, customSystemPrompt,
@@ -205,11 +372,32 @@ public class Agent {
         }
     }
 
-    /** 创建新的 {@link Builder}。 */
+    /**
+     * 创建新的 {@link Builder}。
+     *
+     * @return 默认配置的 Builder
+     */
     public static Builder builder() {
         return new Builder();
     }
 
+    /**
+     * 全参构造函数（通常通过 {@link Builder#build()} 调用）。
+     * <p>副作用：初始化 system prompt、OpenAI 后端时预置 system 消息、plan 模式 plan 文件路径。
+     *
+     * @param permissionMode       权限模式
+     * @param model                模型 ID
+     * @param apiBase              OpenAI 兼容 base URL；{@code null}/空则 Anthropic
+     * @param anthropicBaseUrl     Anthropic base URL
+     * @param apiKey               API Key（可 {@code null}，从环境变量解析）
+     * @param thinking             是否请求 extended thinking
+     * @param maxCostUsd           可选美元预算
+     * @param maxTurns             可选轮次上限
+     * @param confirmFn            危险操作确认回调
+     * @param customSystemPrompt   自定义 system prompt
+     * @param customTools          自定义工具列表
+     * @param isSubAgent           是否子 Agent
+     */
     public Agent(
             String permissionMode,
             String model,
@@ -273,9 +461,11 @@ public class Agent {
     }
 
     /**
-     * OpenAI/Kimi system message body.
-     * On Moonshot, project context (CLAUDE.md) must live in the system role — putting a large
-     * {@code <system-reminder>} on the first user message breaks {@code $web_search} tool selection.
+     * 构建 OpenAI/Kimi 路径的 system 消息正文。
+     * <p>Kimi 上必须把项目上下文（CLAUDE.md 等）放在 system role；
+     * 若放在首条 user 的 {@code <system-reminder>} 中会破坏 {@code $web_search} 工具选择。
+     *
+     * @return 含 base systemPrompt、Kimi 搜索提示与 userContextReminder 的完整 system 文本
      */
     private String buildOpenAISystemContent() {
         StringBuilder sb = new StringBuilder(systemPrompt != null ? systemPrompt : "");
@@ -289,8 +479,10 @@ public class Agent {
     }
 
     /**
-     * Appended to system prompt on Moonshot so the model uses hosted search.
-     * @see <a href="https://platform.kimi.com/docs/guide/use-web-search">Kimi $web_search</a>
+     * 追加到 Kimi system prompt 的联网搜索强制指引。
+     * <p>要求模型对实时数据优先调用 {@link #KIMI_BUILTIN_WEB_SEARCH}，禁止 tool_search/curl 等替代方案。
+     *
+     * @see <a href="https://platform.kimi.com/docs/guide/use-web-search">Kimi $web_search 文档</a>
      */
     private static final String KIMI_WEB_SEARCH_HINT =
             "\n\n# Kimi hosted web search (MANDATORY)\n"
@@ -304,9 +496,14 @@ public class Agent {
                     + "  - web_fetch of search-engine result pages\n"
                     + "  - asking the user to search for you\n";
 
-    /** Kimi/Moonshot 内置联网搜索工具名（见 platform.kimi.com 文档）。 */
+    /** Kimi/Moonshot 内置联网搜索工具名（type=builtin_function，见 platform.kimi.com 文档）。 */
     public static final String KIMI_BUILTIN_WEB_SEARCH = "$web_search";
 
+    /**
+     * 判断当前是否使用 Kimi/Moonshot 后端（根据 apiBase 域名启发式）。
+     *
+     * @return {@code true} 若 apiBase 含 moonshot/kimi.com/kimi.ai
+     */
     private boolean isKimiBackend() {
         if (apiBase == null || apiBase.isEmpty()) {
             return false;
@@ -315,6 +512,13 @@ public class Agent {
         return b.contains("moonshot") || b.contains("kimi.com") || b.contains("kimi.ai");
     }
 
+    /**
+     * 解析 API Key：优先使用显式参数，否则按后端类型从环境变量链读取。
+     *
+     * @param apiKey  构造参数传入的 key，可为 {@code null}
+     * @param openai  是否 OpenAI 兼容后端（决定 env 优先级）
+     * @return 解析到的 key，或 {@code null}
+     */
     private static String resolveApiKey(String apiKey, boolean openai) {
         if (apiKey != null && !apiKey.isEmpty()) {
             return apiKey;
@@ -326,6 +530,12 @@ public class Agent {
         return firstEnv("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MOONSHOT_API_KEY", "KIMI_API_KEY");
     }
 
+    /**
+     * 按顺序读取第一个非空环境变量。
+     *
+     * @param names 变量名列表
+     * @return 第一个非空值，或 {@code null}
+     */
     private static String firstEnv(String... names) {
         for (String name : names) {
             String v = System.getenv(name);
@@ -336,6 +546,12 @@ public class Agent {
         return null;
     }
 
+    /**
+     * 去除 URL 末尾斜杠。
+     *
+     * @param s 原始 URL
+     * @return 无尾随 {@code /} 的字符串
+     */
     private static String stripTrailingSlash(String s) {
         while (s.endsWith("/")) {
             s = s.substring(0, s.length() - 1);
@@ -343,6 +559,12 @@ public class Agent {
         return s;
     }
 
+    /**
+     * 查询模型上下文窗口 token 上限。
+     *
+     * @param model 模型 ID
+     * @return 窗口大小；未知 kimi/moonshot 默认 131072，其它默认 200000
+     */
     private static int getContextWindow(String model) {
         if (model == null) {
             return 200000;
@@ -358,6 +580,12 @@ public class Agent {
         return 200000;
     }
 
+    /**
+     * 模型是否支持 extended thinking（Claude 4 系列 opus/sonnet/haiku，排除 Claude 3）。
+     *
+     * @param model 模型 ID
+     * @return {@code true} 若支持 thinking
+     */
     private static boolean modelSupportsThinking(String model) {
         String m = model.toLowerCase(Locale.ROOT);
         if (m.contains("claude-3-") || m.contains("3-5-") || m.contains("3-7-")) {
@@ -366,11 +594,23 @@ public class Agent {
         return m.contains("claude") && (m.contains("opus") || m.contains("sonnet") || m.contains("haiku"));
     }
 
+    /**
+     * 模型是否支持 adaptive thinking（opus-4-6 / sonnet-4-6）。
+     *
+     * @param model 模型 ID
+     * @return {@code true} 若支持 adaptive 模式
+     */
     private static boolean modelSupportsAdaptiveThinking(String model) {
         String m = model.toLowerCase(Locale.ROOT);
         return m.contains("opus-4-6") || m.contains("sonnet-4-6");
     }
 
+    /**
+     * 根据模型 ID 返回 max_tokens 上限（Anthropic 路径输出预算）。
+     *
+     * @param model 模型 ID
+     * @return max output tokens
+     */
     private static int getMaxOutputTokens(String model) {
         String m = model.toLowerCase(Locale.ROOT);
         if (m.contains("opus-4-6")) return 64000;
@@ -379,6 +619,11 @@ public class Agent {
         return 16384;
     }
 
+    /**
+     * 根据构造参数与模型能力解析 thinking 模式字符串。
+     *
+     * @return {@code disabled}、{@code enabled} 或 {@code adaptive}
+     */
     private String resolveThinkingMode() {
         if (!thinking) return "disabled";
         if (!modelSupportsThinking(model)) return "disabled";
@@ -386,6 +631,12 @@ public class Agent {
         return "enabled";
     }
 
+    /**
+     * 由可变参数构建不可变 {@link Set}。
+     *
+     * @param items 元素
+     * @return 不可变 Set
+     */
     private static Set<String> setOf(String... items) {
         Set<String> s = new HashSet<>();
         Collections.addAll(s, items);
@@ -394,6 +645,12 @@ public class Agent {
 
     // ─── Anthropic prefix caching ─────────────────────────────────
 
+    /**
+     * 构建 Anthropic system 参数：静态块带 ephemeral cache_control，动态块（含 plan 后缀）不缓存。
+     *
+     * @return system content blocks 列表
+     * @sideeffects 无（纯构建）
+     */
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> buildAnthropicSystem() {
         String planSuffix = "plan".equals(permissionMode) ? buildPlanModePrompt() : "";
@@ -415,6 +672,13 @@ public class Agent {
         return blocks;
     }
 
+    /**
+     * 在消息列表最后一条 content 的末 block 上附加 ephemeral cache breakpoint。
+     * <p>thinking/redacted_thinking block 不附加，避免破坏 cache 语义。
+     *
+     * @param messages 原始 Anthropic messages
+     * @return 深拷贝并可能附加 cache_control 的新列表
+     */
     @SuppressWarnings("unchecked")
     private List<Map<String, Object>> withCacheBreakpoints(List<Map<String, Object>> messages) {
         if (messages == null || messages.isEmpty()) {
@@ -456,39 +720,66 @@ public class Agent {
         return out;
     }
 
+    /**
+     * 通过 Gson 往返深拷贝消息列表，避免修改原列表及 API 元数据污染。
+     *
+     * @param messages 源消息列表
+     * @return 可变深拷贝；解析失败时返回空列表
+     */
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> deepCopyMessages(List<Map<String, Object>> messages) {
-        // Gson round-trip keeps nested maps/lists mutable and free of API metadata side effects.
+        // Gson round-trip 保持嵌套 Map/List 可变，且剥离 API 元数据副作用。
         String json = GSON.toJson(messages);
         List<Map<String, Object>> copy = GSON.fromJson(json, LIST_MAP_TYPE);
         return copy != null ? copy : new ArrayList<>();
     }
 
-    /** 当前是否正在处理一轮 chat（供 SIGINT 判断是否 abort）。 */
+    /**
+     * 当前是否正在处理一轮 {@link #chat}（供 SIGINT 判断是否可 abort）。
+     *
+     * @return {@code true} 若 processing 标志已置位
+     */
     public boolean isProcessing() {
         return processing.get();
     }
 
-    /** 中断当前任务，并停止 /loop 与 /goal。 */
+    /**
+     * 中断当前任务，并停止 /loop 与 /goal 循环。
+     *
+     * @sideeffects 置位 {@link #aborted}、{@link #loopStop}、{@link #goalStop}
+     */
     public void abort() {
         aborted.set(true);
         loopStop = true;
         goalStop = true;
     }
 
-    /** 设置危险命令确认回调。 */
+    /**
+     * 设置危险命令确认回调。
+     *
+     * @param fn 确认函数；{@code null} 时回退 stdin
+     */
     public void setConfirmFn(ConfirmFn fn) {
         this.confirmFn = fn;
     }
 
-    /** 设置计划模式审批回调。 */
+    /**
+     * 设置计划模式退出时的审批回调。
+     *
+     * @param fn 审阅 plan 并返回 choice 的回调
+     */
     public void setPlanApprovalFn(PlanApprovalFn fn) {
         this.planApprovalFn = fn;
     }
 
     // ─── 计划模式切换 ───────────────────────────────────────────
 
-    /** 在 plan 模式与先前模式之间切换；返回当前 permissionMode。 */
+    /**
+     * 在 plan 模式与先前模式之间切换。
+     *
+     * @return 切换后的 {@link #permissionMode}
+     * @sideeffects 更新 systemPrompt、OpenAI system 消息、planFilePath、UI 提示
+     */
     public String togglePlanMode() {
         if ("plan".equals(permissionMode)) {
             permissionMode = prePlanMode != null ? prePlanMode : "default";
@@ -513,7 +804,11 @@ public class Agent {
         }
     }
 
-    /** 返回累计 input/output token 用量。 */
+    /**
+     * 返回累计 input/output token 用量快照。
+     *
+     * @return Map：{@code input}、{@code output}
+     */
     public Map<String, Integer> getTokenUsage() {
         Map<String, Integer> m = new LinkedHashMap<>();
         m.put("input", totalInputTokens);
@@ -524,8 +819,10 @@ public class Agent {
     // ─── 主入口：chat / runOnce ─────────────────────────────────
 
     /**
-     * 处理一条用户消息：初始化 MCP（首次）、执行 Anthropic 或 OpenAI 对话循环、
-     * 自动保存会话。
+     * 处理一条用户消息：首次 chat 初始化 MCP、执行 Anthropic/OpenAI 对话循环、自动保存会话。
+     *
+     * @param userMessage 用户输入文本
+     * @sideeffects 更新对话历史、token 统计；主 Agent 结束时 {@link #autoSave} 与打印分隔线
      */
     public void chat(String userMessage) {
         if (!mcpInitialized && !isSubAgent) {
@@ -562,6 +859,10 @@ public class Agent {
 
     /**
      * 单次运行并收集输出文本与 token 增量（子 Agent / 评估器用，不直接打印 UI）。
+     *
+     * @param prompt 输入 prompt
+     * @return Map：{@code text} assistant 全文，{@code tokens} 含 {@code input}/{@code output} 增量
+     * @sideeffects 调用 {@link #chat}，临时启用 {@link #outputBuffer}
      */
     public Map<String, Object> runOnce(String prompt) {
         outputBuffer = new ArrayList<>();
@@ -582,7 +883,11 @@ public class Agent {
         return result;
     }
 
-    /** 释放 MCP 连接与工具线程池。 */
+    /**
+     * 释放 MCP 连接与工具线程池。
+     *
+     * @sideeffects 断开 MCP、{@code shutdownNow} toolExecutor
+     */
     public void close() {
         if (mcpInitialized) {
             mcpManager.disconnectAll();
@@ -590,6 +895,11 @@ public class Agent {
         toolExecutor.shutdownNow();
     }
 
+    /**
+     * 输出 assistant 文本：子 Agent 写入 outputBuffer，主 Agent 打印 UI。
+     *
+     * @param text 待输出片段
+     */
     private void emitText(String text) {
         if (outputBuffer != null) {
             outputBuffer.add(text);
@@ -600,7 +910,11 @@ public class Agent {
 
     // ─── REPL 命令 ───────────────────────────────────────────────
 
-    /** 清空对话历史与 token 统计。 */
+    /**
+     * 清空对话历史与 token 统计，保留 OpenAI system 消息。
+     *
+     * @sideeffects 清空消息列表、重置 token 计数、UI 提示
+     */
     public void clearHistory() {
         anthropicMessages.clear();
         openaiMessages.clear();
@@ -618,7 +932,11 @@ public class Agent {
         Ui.printInfo("Conversation cleared.");
     }
 
-    /** 显示 token 用量、估算费用与预算/轮次信息。 */
+    /**
+     * 显示 token 用量、估算费用、cache 命中率与预算/轮次信息。
+     *
+     * @sideeffects 通过 {@link Ui#printInfo} 输出
+     */
     public void showCost() {
         double total = getCurrentCostUsd();
         String budgetInfo = maxCostUsd != null ? String.format(" / $%s budget", maxCostUsd) : "";
@@ -635,6 +953,11 @@ public class Agent {
                 totalInputTokens, totalOutputTokens, cacheInfo, total, budgetInfo, turnInfo));
     }
 
+    /**
+     * 按固定单价估算当前会话美元成本（含 cache read/write 折扣）。
+     *
+     * @return 估算 USD 金额
+     */
     private double getCurrentCostUsd() {
         double M = 1_000_000.0;
         return (totalInputTokens / M) * 3
@@ -643,6 +966,11 @@ public class Agent {
                 + (totalOutputTokens / M) * 15;
     }
 
+    /**
+     * 检查是否超出 {@link #maxCostUsd} 或 {@link #maxTurns} 预算。
+     *
+     * @return Map：{@code exceeded}（boolean）、超限时含 {@code reason}
+     */
     private Map<String, Object> checkBudget() {
         Map<String, Object> r = new LinkedHashMap<>();
         if (maxCostUsd != null && getCurrentCostUsd() >= maxCostUsd) {
@@ -660,14 +988,24 @@ public class Agent {
         return r;
     }
 
-    /** 手动触发对话压缩。 */
+    /**
+     * 手动触发对话压缩（LLM 摘要折叠）。
+     *
+     * @sideeffects 调用 {@link #compactConversation}，可能改写消息历史
+     */
     public void compact() {
         compactConversation();
     }
 
     // ─── /goal 目标追踪 ─────────────────────────────────────────
 
-    /** 激活 session 级目标；返回注入 Agent 的首条 directive。 */
+    /**
+     * 激活 session 级 /goal 停止条件。
+     *
+     * @param condition 自然语言停止条件（由 evaluator 判定）
+     * @return 注入 Agent 的首条 directive 文本（{@link Autonomy#goalDirective}）
+     * @sideeffects 初始化 {@link #activeGoal}、UI 提示
+     */
     public String setGoal(String condition) {
         activeGoal = new LinkedHashMap<>();
         activeGoal.put("condition", condition);
@@ -678,7 +1016,11 @@ public class Agent {
         return Autonomy.goalDirective(condition);
     }
 
-    /** 显示当前 /goal 状态。 */
+    /**
+     * 显示当前 /goal 状态（条件、迭代次数、耗时、上次判定原因）。
+     *
+     * @sideeffects UI 输出
+     */
     public void showGoal() {
         if (activeGoal == null) {
             Ui.printInfo("No active goal. Set one with /goal <condition>.");
@@ -693,7 +1035,12 @@ public class Agent {
                 + String.format("%.1f", secs) + "s" + last);
     }
 
-    /** 按 directive 启动目标追踪循环，直至达成、不可能或中断。 */
+    /**
+     * 按 directive 启动目标追踪循环：chat → evaluateGoal → 未达成则继续，直至达成/不可能/中断。
+     *
+     * @param directive 首条驱动 prompt（通常来自 {@link #setGoal} 返回值）
+     * @sideeffects 多次 {@link #chat}、更新 activeGoal、finally 清空 activeGoal
+     */
     public void pursueGoal(String directive) {
         if (activeGoal == null) {
             return;
@@ -744,6 +1091,13 @@ public class Agent {
         }
     }
 
+    /**
+     * 用独立 evaluator LLM 判定 /goal 条件是否满足或不可能达成。
+     *
+     * @param condition 目标停止条件
+     * @return {@link Autonomy.GoalVerdict}（ok / impossible / reason）
+     * @sideeffects 发起一次非流式 API 调用（{@link #runEvaluatorQuery}）
+     */
     private Autonomy.GoalVerdict evaluateGoal(String condition) {
         String transcript = extractLastAssistantText();
         List<Map<String, Object>> messages = new ArrayList<>();
@@ -759,6 +1113,14 @@ public class Agent {
         }
     }
 
+    /**
+     * 执行 evaluator 非流式查询（/goal 判定、通用 side query）。
+     *
+     * @param system   system prompt
+     * @param messages 对话消息（不含 system）
+     * @return assistant 文本
+     * @throws RuntimeException 包装 IO/中断异常（经 {@link ApiHttp#withRetry} 重试）
+     */
     private String runEvaluatorQuery(String system, List<Map<String, Object>> messages) {
         return ApiHttp.withRetry(() -> {
             try {
@@ -775,6 +1137,14 @@ public class Agent {
         }, 3);
     }
 
+    /**
+     * Auto Mode 两阶段分类器的非流式 LLM 调用。
+     *
+     * @param system    分类器 system prompt
+     * @param user      user 消息（含 transcript + rules）
+     * @param maxTokens 输出 token 上限
+     * @return 分类器原始 JSON 文本
+     */
     private String runClassifierQuery(String system, String user, int maxTokens) {
         return ApiHttp.withRetry(() -> {
             try {
@@ -793,6 +1163,11 @@ public class Agent {
         }, 3);
     }
 
+    /**
+     * 构建 Memory 预取用的 side query 函数（短非流式 LLM 调用）。
+     *
+     * @return {@link Memory.SideQueryFn} 适配当前双后端
+     */
     private Memory.SideQueryFn buildSideQuery() {
         return (system, userMessage) -> {
             if (!useOpenAI) {
@@ -807,6 +1182,11 @@ public class Agent {
         };
     }
 
+    /**
+     * 从对话历史提取最后一条 assistant 纯文本（用于 /goal transcript）。
+     *
+     * @return assistant 文本；无则空字符串
+     */
     @SuppressWarnings("unchecked")
     private String extractLastAssistantText() {
         if (useOpenAI) {
@@ -845,7 +1225,12 @@ public class Agent {
 
     // ─── /loop 循环调度 ─────────────────────────────────────────
 
-    /** 解析并执行 /loop 命令（固定间隔或 dynamic 自调度）。 */
+    /**
+     * 解析并执行 /loop 命令（固定 interval 或 dynamic 自调度）。
+     *
+     * @param rawInput 用户输入的 /loop 原始参数
+     * @sideeffects 启动循环 chat；长间隔时 UI 提示无 cloud 后端
+     */
     @SuppressWarnings("unchecked")
     public void runLoop(String rawInput) {
         Map<String, Object> spec = Autonomy.parseLoopInput(rawInput);
@@ -876,6 +1261,12 @@ public class Agent {
         }
     }
 
+    /**
+     * interval 模式 /loop：固定秒数间隔重复 {@link #chat}。
+     *
+     * @param spec {@link Autonomy#parseLoopInput} 解析结果（含 prompt、interval_seconds 等）
+     * @sideeffects 循环 chat 直至 loopStop/aborted/预算/迭代上限
+     */
     private void runLoopInterval(Map<String, Object> spec) {
         Ui.printInfo("⟳ /loop scheduled every " + spec.get("interval_label")
                 + " (session-only, not persisted — dies when this process exits). Ctrl+C to stop.");
@@ -906,6 +1297,12 @@ public class Agent {
         }
     }
 
+    /**
+     * dynamic 模式 /loop：模型通过 {@code schedule_wakeup} 自调度下一 tick。
+     *
+     * @param spec 解析结果（含初始 prompt）
+     * @sideeffects 临时注入 schedule_wakeup 工具、更新 {@link #pendingWakeup}、finally 清理工具
+     */
     @SuppressWarnings("unchecked")
     private void runLoopDynamic(Map<String, Object> spec) {
         Ui.printInfo(
@@ -977,6 +1374,13 @@ public class Agent {
         }
     }
 
+    /**
+     * 处理 schedule_wakeup 工具调用：写入 {@link #pendingWakeup} 供 dynamic loop 睡眠后下一 tick。
+     *
+     * @param inp 工具参数（delaySeconds、reason、prompt）
+     * @return 给模型的确认文本
+     * @sideeffects 设置 pendingWakeup
+     */
     private String executeScheduleWakeup(Map<String, Object> inp) {
         int delay = Autonomy.clampWakeupDelay(inp.get("delaySeconds"));
         String reason = inp.get("reason") instanceof String ? (String) inp.get("reason") : "";
@@ -989,6 +1393,12 @@ public class Agent {
                 + "s. The loop will resume then; end your turn now.";
     }
 
+    /**
+     * 可中断睡眠：每 200ms 检测 loopStop/aborted。
+     *
+     * @param seconds 目标睡眠秒数
+     * @return {@code true} 若被中断提前醒来
+     */
     private boolean interruptibleSleep(double seconds) {
         long start = System.currentTimeMillis();
         long targetMs = (long) (seconds * 1000);
@@ -1006,23 +1416,42 @@ public class Agent {
         return false;
     }
 
-    /** 停止 /loop 循环。 */
+    /**
+     * 停止 /loop 循环。
+     *
+     * @sideeffects 置位 {@link #loopStop}
+     */
     public void stopLoop() {
         loopStop = true;
     }
 
-    /** 停止 /goal 追踪。 */
+    /**
+     * 停止 /goal 追踪。
+     *
+     * @sideeffects 置位 {@link #goalStop}
+     */
     public void stopGoal() {
         goalStop = true;
     }
 
     // ─── Auto Mode 工具分类 ───────────────────────────────────────
 
+    /**
+     * Auto Mode 下对单次工具调用进行 LLM 两阶段 block/allow 分类。
+     * <p>流程：Tools.checkPermission(default) → 快速路径 → stage1 →（若 block）stage2 →
+     * 累计拒绝达上限则 {@link #autoFallback} 回退人工确认。
+     *
+     * @param toolName 工具名
+     * @param inp      工具参数
+     * @return permission Map：{@code action} 为 allow/deny/confirm，deny 时含 message
+     * @sideeffects 可能更新 autoConsecutiveDenials、autoTotalDenials、UI 提示
+     */
     private Map<String, String> classifyToolCall(String toolName, Map<String, Object> inp) {
         Map<String, String> base = Tools.checkPermission(toolName, inp, "default", planFilePath);
         if ("deny".equals(base.get("action"))) {
             return base;
         }
+        // 只读快速路径：无需 LLM 分类，直接 allow
         if (Autonomy.AUTO_MODE_FAST_PATH_TOOLS.contains(toolName)) {
             Map<String, String> allow = new HashMap<>();
             allow.put("action", "allow");
@@ -1033,6 +1462,7 @@ public class Agent {
         }
         Autonomy.BlockVerdict verdict;
         try {
+            // 两阶段分类：stage1 短输出初判 → block 则 stage2 长输出复核
             Map<String, Object> rules = Autonomy.loadAutoModeRules();
             List<Map<String, Object>> history = useOpenAI ? openaiMessages : anthropicMessages;
             Map<String, Object> pending = new LinkedHashMap<>();
@@ -1077,6 +1507,12 @@ public class Agent {
         return deny;
     }
 
+    /**
+     * Auto Mode 拒绝达上限或无 API Key 时的回退策略。
+     *
+     * @param message 拒绝/提示信息
+     * @return confirm（有 confirmFn）或 deny（headless）
+     */
     private Map<String, String> autoFallback(String message) {
         if (confirmFn != null) {
             Map<String, String> r = new HashMap<>();
@@ -1090,6 +1526,11 @@ public class Agent {
         return r;
     }
 
+    /**
+     * 子 Agent 继承的权限模式：plan/auto 保持，其它降为 bypassPermissions。
+     *
+     * @return 子 Agent permissionMode 字符串
+     */
     private String childPermissionMode() {
         if ("plan".equals(permissionMode)) return "plan";
         if ("auto".equals(permissionMode)) return "auto";
@@ -1098,7 +1539,12 @@ public class Agent {
 
     // ─── 会话持久化 ─────────────────────────────────────────────
 
-    /** 从保存的会话数据恢复 anthropicMessages 或 openaiMessages。 */
+    /**
+     * 从保存的会话数据恢复 anthropicMessages 或 openaiMessages。
+     *
+     * @param data Session 持久化 Map（含 anthropicMessages / openaiMessages）
+     * @sideeffects 替换内存中的消息列表、UI 提示
+     */
     @SuppressWarnings("unchecked")
     public void restoreSession(Map<String, Object> data) {
         if (data.get("anthropicMessages") instanceof List) {
@@ -1112,10 +1558,20 @@ public class Agent {
         Ui.printInfo("Session restored (" + getMessageCount() + " messages).");
     }
 
+    /**
+     * 返回当前后端的消息条数。
+     *
+     * @return openaiMessages 或 anthropicMessages 的 size
+     */
     private int getMessageCount() {
         return useOpenAI ? openaiMessages.size() : anthropicMessages.size();
     }
 
+    /**
+     * 主 Agent chat 结束后自动持久化会话到 ~/.mini-claude/sessions。
+     *
+     * @sideeffects 调用 {@link Session#saveSession}；异常静默忽略
+     */
     private void autoSave() {
         try {
             Map<String, Object> metadata = new LinkedHashMap<>();
@@ -1135,6 +1591,11 @@ public class Agent {
 
     // ─── 自动压缩 ───────────────────────────────────────────────
 
+    /**
+     * 粗粒度自动压缩闸门：lastInputTokenCount 超过 effectiveWindow 的 85% 时触发 compact。
+     *
+     * @sideeffects 可能调用 {@link #compactConversation}
+     */
     private void checkAndCompact() {
         if (lastInputTokenCount > effectiveWindow * 0.85) {
             Ui.printInfo("Context window filling up, compacting conversation...");
@@ -1142,6 +1603,11 @@ public class Agent {
         }
     }
 
+    /**
+     * 按当前后端执行 LLM 摘要式 compact，折叠旧消息为一条 summary + 确认 assistant。
+     *
+     * @sideeffects 改写消息历史、重置 lastInputTokenCount、UI 提示
+     */
     private void compactConversation() {
         if (useOpenAI) {
             compactOpenAI();
@@ -1151,6 +1617,11 @@ public class Agent {
         Ui.printInfo("Conversation compacted.");
     }
 
+    /**
+     * Anthropic 路径 compact：保留最后 user 消息，中间历史 LLM 摘要后替换为 summary 对。
+     *
+     * @sideeffects 清空并重写 anthropicMessages（消息数 &lt; 4 时 no-op）
+     */
     @SuppressWarnings("unchecked")
     private void compactAnthropic() {
         if (anthropicMessages.size() < 4) {
@@ -1184,6 +1655,11 @@ public class Agent {
         lastInputTokenCount = 0;
     }
 
+    /**
+     * OpenAI 路径 compact：保留 system 与最后 user，中间历史 LLM 摘要。
+     *
+     * @sideeffects 清空并重写 openaiMessages（消息数 &lt; 5 时 no-op）
+     */
     @SuppressWarnings("unchecked")
     private void compactOpenAI() {
         if (openaiMessages.size() < 5) {
@@ -1222,6 +1698,12 @@ public class Agent {
 
     // ─── 多层上下文压缩 pipeline ────────────────────────────────
 
+    /**
+     * 多层上下文压缩 pipeline 入口（每轮 API 前调用）。
+     * <p>顺序：budgetToolResults → snipStaleResults → microcompact（Anthropic/OpenAI 各一套）。
+     *
+     * @sideeffects 就地修改消息历史中 tool result 内容
+     */
     private void runCompressionPipeline() {
         if (useOpenAI) {
             budgetToolResultsOpenAI();
@@ -1234,6 +1716,11 @@ public class Agent {
         }
     }
 
+    /**
+     * Anthropic：高利用率（≥50%）时截断过长 tool_result 文本（保留头尾各半 budget）。
+     *
+     * @sideeffects 就地修改 tool_result block 的 content
+     */
     @SuppressWarnings("unchecked")
     private void budgetToolResultsAnthropic() {
         double utilization = effectiveWindow > 0
@@ -1259,6 +1746,11 @@ public class Agent {
         }
     }
 
+    /**
+     * OpenAI：高利用率时对 role=tool 消息做与 Anthropic 对称的长度 budget 截断。
+     *
+     * @sideeffects 就地修改 tool 消息 content
+     */
     private void budgetToolResultsOpenAI() {
         double utilization = effectiveWindow > 0
                 ? (double) lastInputTokenCount / effectiveWindow : 0;
@@ -1278,6 +1770,12 @@ public class Agent {
         }
     }
 
+    /**
+     * Anthropic snip：利用率达标时，对 SNIPPABLE_TOOLS 的旧 tool_result 替换 {@link #SNIP_PLACEHOLDER}。
+     * <p>同文件多次 read_file 时保留最新一次；始终保留最近 {@link #KEEP_RECENT_RESULTS} 条。
+     *
+     * @sideeffects 就地修改 tool_result content
+     */
     @SuppressWarnings("unchecked")
     private void snipStaleResultsAnthropic() {
         double utilization = effectiveWindow > 0
@@ -1346,6 +1844,11 @@ public class Agent {
         }
     }
 
+    /**
+     * OpenAI snip：对较早的 role=tool 消息替换占位符（保留最近 KEEP_RECENT_RESULTS 条）。
+     *
+     * @sideeffects 就地修改 tool 消息 content
+     */
     private void snipStaleResultsOpenAI() {
         double utilization = effectiveWindow > 0
                 ? (double) lastInputTokenCount / effectiveWindow : 0;
@@ -1368,6 +1871,11 @@ public class Agent {
         }
     }
 
+    /**
+     * Anthropic microcompact：距上次 API ≥5 分钟且利用率压力时，将旧 tool_result 清为 {@code [Old result cleared]}。
+     *
+     * @sideeffects 就地修改 tool_result content
+     */
     @SuppressWarnings("unchecked")
     private void microcompactAnthropic() {
         if (lastApiCallTime <= 0
@@ -1400,6 +1908,11 @@ public class Agent {
         }
     }
 
+    /**
+     * OpenAI microcompact：与 Anthropic 对称，清空较早 role=tool 消息内容。
+     *
+     * @sideeffects 就地修改 tool 消息 content
+     */
     private void microcompactOpenAI() {
         if (lastApiCallTime <= 0
                 || (System.currentTimeMillis() / 1000.0 - lastApiCallTime) < MICROCOMPACT_IDLE_S) {
@@ -1421,6 +1934,12 @@ public class Agent {
         }
     }
 
+    /**
+     * 在 Anthropic 历史中按 tool_use_id 查找对应 tool_use block 的 name 与 input。
+     *
+     * @param toolUseId tool_use block 的 id
+     * @return 含 name、input 的 Map；未找到返回 {@code null}
+     */
     @SuppressWarnings("unchecked")
     private Map<String, Object> findToolUseById(String toolUseId) {
         for (Map<String, Object> msg : anthropicMessages) {
@@ -1442,6 +1961,14 @@ public class Agent {
 
     // ─── 超大 tool result 落盘 ────────────────────────────────────
 
+    /**
+     * 超大 tool result（&gt;30KB）落盘到 ~/.mini-claude/tool-results，返回带预览的截断文本。
+     *
+     * @param toolName 工具名（用于文件名）
+     * @param result   原始结果字符串
+     * @return 原样或带落盘路径与 preview 的截断文本
+     * @sideeffects 可能写磁盘文件
+     */
     private String persistLargeResult(String toolName, String result) {
         if (result == null) result = "";
         int threshold = 30 * 1024;
@@ -1477,14 +2004,21 @@ public class Agent {
 
     // ─── 工具执行与权限 ───────────────────────────────────────────
 
+    /**
+     * 工具执行总路由：Kimi 特殊工具、plan 模式、子 Agent、skill fork、MCP、本地 Tools。
+     *
+     * @param name 工具名
+     * @param inp  解析后的参数 Map
+     * @return 工具结果字符串（给模型作为 tool_result / role=tool content）
+     * @sideeffects 依工具而定（shell、写文件、fork 子 Agent 等）
+     */
     private String executeToolCall(String name, Map<String, Object> inp) {
-        // Kimi builtin $web_search: echo arguments back — server runs the search.
-        // See https://platform.kimi.com/docs/guide/use-web-search
+        // Kimi 内置 $web_search：本地 echo arguments，服务端在下一轮执行检索。
+        // 见 https://platform.kimi.com/docs/guide/use-web-search
         if (KIMI_BUILTIN_WEB_SEARCH.equals(name)) {
             return GSON.toJson(inp != null ? inp : Collections.emptyMap());
         }
-        // Model often tool_searches for "web_search" because the prompt mentions it,
-        // but on Moonshot that tool is replaced by builtin $web_search.
+        // 模型常因 prompt 提及 web_search 而调用 tool_search；Moonshot 上应直接用 $web_search。
         if ("tool_search".equals(name) && isKimiBackend()) {
             String q = inp != null && inp.get("query") != null
                     ? String.valueOf(inp.get("query")).toLowerCase(Locale.ROOT) : "";
@@ -1520,6 +2054,13 @@ public class Agent {
         return Tools.executeTool(name, inp, readFileState);
     }
 
+    /**
+     * 执行 skill 工具：inline 激活或 fork 子 Agent 在隔离上下文中跑 skill prompt。
+     *
+     * @param inp 含 skill_name、args
+     * @return skill 输出或 fork 结果文本
+     * @sideeffects fork 时创建子 Agent、汇总 token、UI sub-agent 标记
+     */
     @SuppressWarnings("unchecked")
     private String executeSkillTool(Map<String, Object> inp) {
         String skillName = inp.get("skill_name") != null ? String.valueOf(inp.get("skill_name")) : "";
@@ -1529,6 +2070,7 @@ public class Agent {
             return "Unknown skill: " + skillName;
         }
         if ("fork".equals(result.get("context"))) {
+            // ─── skill fork：在隔离子 Agent 中执行 skill，工具集按 allowed_tools 过滤 ───
             List<Map<String, Object>> subTools;
             Object allowed = result.get("allowed_tools");
             if (allowed instanceof List && !((List<?>) allowed).isEmpty()) {
@@ -1583,6 +2125,11 @@ public class Agent {
         return "[Skill \"" + skillName + "\" activated]\n\n" + result.get("prompt");
     }
 
+    /**
+     * 生成 plan 模式专用 Markdown 文件路径（~/.claude/plans/plan-{sessionId}.md）。
+     *
+     * @return 绝对路径字符串
+     */
     private String generatePlanFilePath() {
         try {
             Path d = Paths.get(System.getProperty("user.home"), ".claude", "plans");
@@ -1594,6 +2141,11 @@ public class Agent {
         }
     }
 
+    /**
+     * 构建 plan 模式追加到 system prompt 的工作流说明（只读 + 唯一可写 plan 文件）。
+     *
+     * @return plan 模式后缀 Markdown
+     */
     private String buildPlanModePrompt() {
         return "\n\n# Plan Mode Active\n\n"
                 + "Plan mode is active. You MUST NOT make any edits (except the plan file below), run non-readonly tools, or make any changes to the system.\n\n"
@@ -1610,6 +2162,13 @@ public class Agent {
                 + "IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask the user to approve — exit_plan_mode handles that.";
     }
 
+    /**
+     * 处理 enter_plan_mode / exit_plan_mode 工具：切换权限、读写 plan 文件、用户审批。
+     *
+     * @param name 工具名
+     * @return 给模型的状态说明文本
+     * @sideeffects 可能修改 permissionMode、systemPrompt、clearHistoryKeepSystem
+     */
     private String executePlanModeTool(String name) {
         if ("enter_plan_mode".equals(name)) {
             if ("plan".equals(permissionMode)) {
@@ -1695,6 +2254,11 @@ public class Agent {
         return "Unknown plan mode tool: " + name;
     }
 
+    /**
+     * 清空对话历史但保留 OpenAI system 消息（plan 批准 clear-and-execute 时用）。
+     *
+     * @sideeffects 清空消息列表、重置 lastInputTokenCount
+     */
     private void clearHistoryKeepSystem() {
         anthropicMessages.clear();
         openaiMessages.clear();
@@ -1707,6 +2271,13 @@ public class Agent {
         lastInputTokenCount = 0;
     }
 
+    /**
+     * 执行 agent 工具：fork 轻量子 Agent（{@link Subagent} 配置）跑独立 prompt。
+     *
+     * @param inp 含 type、description、prompt
+     * @return 子 Agent 输出文本
+     * @sideeffects 创建/关闭子 Agent、汇总 token、UI sub-agent 标记
+     */
     @SuppressWarnings("unchecked")
     private String executeAgentTool(Map<String, Object> inp) {
         String agentType = inp.get("type") != null ? String.valueOf(inp.get("type")) : "general";
@@ -1745,6 +2316,12 @@ public class Agent {
         }
     }
 
+    /**
+     * 按 SubAgentConfig 解析子 Agent 可用工具列表（排除 agent/schedule_wakeup 防递归）。
+     *
+     * @param config 子 Agent 类型配置
+     * @return 过滤后的工具定义列表
+     */
     private List<Map<String, Object>> resolveSubAgentTools(Subagent.SubAgentConfig config) {
         List<Map<String, Object>> source = tools != null ? tools : Tools.TOOL_DEFINITIONS;
         List<Map<String, Object>> out = new ArrayList<>();
@@ -1768,6 +2345,12 @@ public class Agent {
 
     // ─── Memory prefetch ────────────────────────────────────────
 
+    /**
+     * 若 Memory 预取已完成，将相关片段注入消息列表（仅消费一次）。
+     *
+     * @param messages 当前轮消息列表（anthropic 或 openai）
+     * @sideeffects 修改最后 user 消息或追加 user 消息；更新 alreadySurfacedMemories
+     */
     @SuppressWarnings("unchecked")
     private void consumeMemoryPrefetchIfReady(List<Map<String, Object>> messages) {
         Memory.MemoryPrefetch pf = memoryPrefetch;
@@ -1803,6 +2386,13 @@ public class Agent {
         }
     }
 
+    /**
+     * 为本轮用户消息启动异步 Memory 预取（子 Agent 跳过）。
+     *
+     * @param userMessage 用户输入
+     * @param messages    当前消息列表（先消费上一轮预取）
+     * @sideeffects 可能 cancel 上一轮未完成的 prefetch、创建新 MemoryPrefetch
+     */
     private void startMemoryPrefetchForTurn(String userMessage, List<Map<String, Object>> messages) {
         consumeMemoryPrefetchIfReady(messages);
         if (isSubAgent) {
@@ -1818,6 +2408,12 @@ public class Agent {
         }
     }
 
+    /**
+     * 将 user 消息推入 Anthropic 历史；首条可附带 userContextReminder 为独立 text block。
+     *
+     * @param content 用户文本
+     * @sideeffects 追加到 anthropicMessages
+     */
     @SuppressWarnings("unchecked")
     private void pushAnthropicUserMessage(String content) {
         if (anthropicMessages.isEmpty() && userContextReminder != null && !userContextReminder.isEmpty()) {
@@ -1839,6 +2435,12 @@ public class Agent {
         }
     }
 
+    /**
+     * 将 user 消息推入 OpenAI 历史；非 Kimi 首条 user 可拼接 userContextReminder。
+     *
+     * @param content 用户文本
+     * @sideeffects 追加到 openaiMessages
+     */
     private void pushOpenAIUserMessage(String content) {
         boolean isFirstUser = true;
         for (Map<String, Object> m : openaiMessages) {
@@ -1847,8 +2449,8 @@ public class Agent {
                 break;
             }
         }
-        // Kimi: project context already in system (see buildOpenAISystemContent).
-        // A large <system-reminder> on the first user message breaks $web_search tool calls.
+        // Kimi：项目上下文已在 system（见 buildOpenAISystemContent）；
+        // 首条 user 上大段 <system-reminder> 会破坏 $web_search 工具调用。
         if (isFirstUser && !isKimiBackend()
                 && userContextReminder != null && !userContextReminder.isEmpty()) {
             openaiMessages.add(msg("user", userContextReminder + "\n\n" + content));
@@ -1859,14 +2461,31 @@ public class Agent {
 
     // ─── Anthropic 对话循环 ───────────────────────────────────────
 
+    /**
+     * Anthropic Messages API 主对话循环。
+     *
+     * <h2>与 {@link #chatOpenAI} 对称的状态机</h2>
+     * <ul>
+     *   <li>消息格式：content block（text / tool_use / tool_result）</li>
+     *   <li>流式解析见 {@link #doAnthropicStream}；支持流式期间对 CONCURRENCY_SAFE 工具预启动（earlyExecutions）</li>
+     *   <li>tool_use 串行执行（Anthropic 路径无 OpenAI 式 batch 并行，仅 stream 内 early start）</li>
+     * </ul>
+     *
+     * @param userMessage 用户输入
+     * @sideeffects 更新 anthropicMessages、token 统计、可能 fork 子 Agent（经 executeToolCall）
+     */
     @SuppressWarnings("unchecked")
     private void chatAnthropic(String userMessage) {
+        // ─── 阶段 0：入口准备 ─────────────────────────────────
         pushAnthropicUserMessage(userMessage);
         checkAndCompact();
         startMemoryPrefetchForTurn(userMessage, anthropicMessages);
 
+        // ─── 主循环：模型 ↔ 工具 ─────────────────────────────
         while (true) {
             if (aborted.get()) break;
+
+            // 多层压缩 + Memory 注入（只消费一次）
             runCompressionPipeline();
             consumeMemoryPrefetchIfReady(anthropicMessages);
 
@@ -1874,9 +2493,11 @@ public class Agent {
                 Ui.startSpinner();
             }
 
+            // ─── 流式预执行：CONCURRENCY_SAFE 且已 allow 的工具在 tool_use block 完成时即提交线程池 ───
             Map<String, Future<String>> earlyExecutions = new ConcurrentHashMap<>();
             Consumer<Map<String, Object>> onToolBlock = block -> {
                 String name = String.valueOf(block.get("name"));
+                // auto 模式非快速路径工具不做 early start（需等 classifyToolCall）
                 if ("auto".equals(permissionMode)
                         && !Autonomy.AUTO_MODE_FAST_PATH_TOOLS.contains(name)) {
                     return;
@@ -1901,6 +2522,7 @@ public class Agent {
                 Ui.stopSpinner();
             }
 
+            // ─── 阶段 1：记账 ───────────────────────────────────
             lastApiCallTime = System.currentTimeMillis() / 1000.0;
             totalInputTokens += response.inputTokens;
             totalCacheReadTokens += response.cacheReadTokens;
@@ -1909,6 +2531,7 @@ public class Agent {
             lastInputTokenCount = response.inputTokens + response.cacheReadTokens
                     + response.cacheCreationTokens + response.outputTokens;
 
+            // 从 content blocks 收集 tool_use
             List<Map<String, Object>> toolUses = new ArrayList<>();
             for (Map<String, Object> b : response.content) {
                 if ("tool_use".equals(b.get("type"))) {
@@ -1916,11 +2539,13 @@ public class Agent {
                 }
             }
 
+            // ─── 阶段 2：assistant 消息入历史 ───────────────────
             Map<String, Object> assistantMsg = new LinkedHashMap<>();
             assistantMsg.put("role", "assistant");
             assistantMsg.put("content", response.content);
             anthropicMessages.add(assistantMsg);
 
+            // ─── 阶段 3：无工具 → 收尾 ─────────────────────────
             if (toolUses.isEmpty()) {
                 if (!isSubAgent) {
                     Ui.printCost(totalInputTokens, totalOutputTokens,
@@ -1929,6 +2554,7 @@ public class Agent {
                 break;
             }
 
+            // ─── 阶段 4：预算闸门 ───────────────────────────────
             currentTurns++;
             Map<String, Object> budget = checkBudget();
             if (Boolean.TRUE.equals(budget.get("exceeded"))) {
@@ -1936,6 +2562,7 @@ public class Agent {
                 for (Future<?> t : earlyExecutions.values()) {
                     t.cancel(true);
                 }
+                // 协议要求：每个 tool_use 都需 tool_result，即使用占位拒绝
                 List<Map<String, Object>> refusals = new ArrayList<>();
                 for (Map<String, Object> tu : toolUses) {
                     Map<String, Object> tr = new LinkedHashMap<>();
@@ -1951,6 +2578,7 @@ public class Agent {
                 break;
             }
 
+            // ─── 阶段 5：串行执行 tool_use（权限 → 执行 → tool_result）──
             List<Map<String, Object>> toolResults = new ArrayList<>();
             boolean contextBreak = false;
             for (Map<String, Object> tu : toolUses) {
@@ -1962,6 +2590,7 @@ public class Agent {
                 String tuId = String.valueOf(tu.get("id"));
                 Ui.printToolCall(tuName, inp);
 
+                // 优先复用流式期间 earlyExecutions 的结果
                 Future<String> early = earlyExecutions.get(tuId);
                 if (early != null) {
                     String raw;
@@ -1980,6 +2609,7 @@ public class Agent {
                     continue;
                 }
 
+                // 权限：auto → classifyToolCall；否则 Tools.checkPermission
                 Map<String, String> perm;
                 if ("auto".equals(permissionMode)) {
                     perm = classifyToolCall(tuName, inp);
@@ -2016,6 +2646,7 @@ public class Agent {
                 String res = persistLargeResult(tuName, raw);
                 Ui.printToolResult(tuName, res);
 
+                // contextCleared：工具触发清空上下文，结果作为新 user 消息，打断本圈
                 if (contextCleared) {
                     contextCleared = false;
                     pushAnthropicUserMessage(res);
@@ -2041,18 +2672,41 @@ public class Agent {
 
     // ─── Anthropic 流式 API ───────────────────────────────────────
 
+    /**
+     * Anthropic 流式 API 调用的聚合结果（SSE 解析后）。
+     * <p>thinking block 不进入 {@link #content}，仅 text/tool_use 写入历史。
+     */
     private static final class StreamResult {
+        /** 按 index 排序后的 assistant content blocks（不含 thinking）。 */
         List<Map<String, Object>> content = new ArrayList<>();
+        /** message_start / message_delta 中的 input_tokens。 */
         int inputTokens;
+        /** 输出 tokens。 */
         int outputTokens;
+        /** cache_read_input_tokens。 */
         int cacheReadTokens;
+        /** cache_creation_input_tokens。 */
         int cacheCreationTokens;
     }
 
+    /**
+     * 带重试的 Anthropic 流式调用包装。
+     *
+     * @param onToolBlockComplete tool_use block 解析完成时的回调（用于 earlyExecutions）
+     * @return 聚合后的 StreamResult
+     */
     private StreamResult callAnthropicStream(Consumer<Map<String, Object>> onToolBlockComplete) {
         return ApiHttp.withRetry(() -> doAnthropicStream(onToolBlockComplete), 3);
     }
 
+    /**
+     * 执行 Anthropic Messages API 流式请求并解析 SSE 事件。
+     *
+     * @param onToolBlockComplete 每个 tool_use block 完成（input JSON 拼完）时回调
+     * @return StreamResult（content + usage）
+     * @throws RuntimeException IO/中断或 HTTP 失败
+     * @sideeffects 流式 emitText 到 UI；abort 时提前 break SSE 循环
+     */
     @SuppressWarnings("unchecked")
     private StreamResult doAnthropicStream(Consumer<Map<String, Object>> onToolBlockComplete) {
         int maxOutput = getMaxOutputTokens(model);
@@ -2208,11 +2862,11 @@ public class Agent {
                             }
                         }
                     } else if ("message_stop".equals(type)) {
-                        // done
+                        // SSE 流结束
                     }
                 }
 
-                // Assemble content in index order, filter thinking
+                // 按 index 顺序组装 content blocks，过滤 thinking（不写入对话历史）
                 List<Integer> indices = new ArrayList<>(blocksByIndex.keySet());
                 Collections.sort(indices);
                 for (int idx : indices) {
@@ -2582,15 +3236,27 @@ public class Agent {
         }
     }
 
+    /**
+     * 带重试的 OpenAI 兼容流式 Chat Completions 调用。
+     *
+     * @return 折成非流式形态的 response Map（choices + usage）
+     */
     private Map<String, Object> callOpenAIStream() {
         return ApiHttp.withRetry(this::doOpenAIStream, 3);
     }
 
+    /**
+     * 执行 OpenAI Chat Completions 流式请求，解析 delta 并组装 assistant message。
+     *
+     * @return Map：{@code choices[0].message}（含 content、tool_calls）、{@code usage}
+     * @throws RuntimeException IO/中断失败
+     * @sideeffects 流式 emitText；Kimi 上注入 $web_search 工具并禁用 thinking
+     */
     @SuppressWarnings("unchecked")
     private Map<String, Object> doOpenAIStream() {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", model);
-        // Kimi $web_search can inflate context; allow a larger completion budget on Moonshot
+        // Kimi $web_search 可能膨胀上下文；Moonshot 上放宽 completion token 预算
         body.put("max_tokens", isKimiBackend() ? 32768 : 16384);
         body.put("tools", buildOpenAIToolsPayload());
         body.put("messages", openaiMessages);
@@ -2598,7 +3264,7 @@ public class Agent {
         Map<String, Object> streamOpts = new LinkedHashMap<>();
         streamOpts.put("include_usage", true);
         body.put("stream_options", streamOpts);
-        // Docs: when using $web_search, thinking must be disabled
+        // 文档要求：使用 $web_search 时必须禁用 thinking
         if (isKimiBackend()) {
             Map<String, Object> thinking = new LinkedHashMap<>();
             thinking.put("type", "disabled");
@@ -2699,8 +3365,8 @@ public class Agent {
                                 Map<String, Object> neu = new LinkedHashMap<>();
                                 neu.put("id", tc.has("id") && !tc.get("id").isJsonNull()
                                         ? tc.get("id").getAsString() : "");
-                                // Preserve builtin_function for Kimi $web_search — forcing
-                                // type=function breaks the next-turn hosted search execution.
+                                // 保留 Kimi $web_search 的 builtin_function type；
+                                // 强制改为 function 会破坏下一轮服务端托管搜索。
                                 neu.put("type", tc.has("type") && !tc.get("type").isJsonNull()
                                         ? tc.get("type").getAsString() : "function");
                                 String name = "";
@@ -2777,6 +3443,16 @@ public class Agent {
 
     // ─── 非流式 API 辅助 ──────────────────────────────────────────
 
+    /**
+     * Anthropic 非流式 Messages API（evaluator、compact 摘要等辅助调用）。
+     *
+     * @param system    system prompt 字符串
+     * @param messages  对话消息
+     * @param maxTokens 输出上限
+     * @return 拼接后的 text block 内容
+     * @throws IOException          HTTP 失败
+     * @throws InterruptedException 中断
+     */
     private String anthropicNonStream(String system, List<Map<String, Object>> messages, int maxTokens)
             throws IOException, InterruptedException {
         Map<String, Object> body = new LinkedHashMap<>();
@@ -2802,6 +3478,15 @@ public class Agent {
         return sb.toString();
     }
 
+    /**
+     * OpenAI 非流式 Chat Completions（evaluator、compact 摘要等辅助调用）。
+     *
+     * @param messages  含 system 的完整消息列表
+     * @param maxTokens 输出上限
+     * @return assistant content 文本
+     * @throws IOException          HTTP 失败
+     * @throws InterruptedException 中断
+     */
     private String openaiNonStream(List<Map<String, Object>> messages, int maxTokens)
             throws IOException, InterruptedException {
         Map<String, Object> body = new LinkedHashMap<>();
@@ -2824,6 +3509,12 @@ public class Agent {
         return "";
     }
 
+    /**
+     * 将 Anthropic 风格工具定义转为 OpenAI function tools 格式。
+     *
+     * @param tools 源工具定义（name、description、input_schema）
+     * @return OpenAI tools 数组元素列表
+     */
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> toOpenAITools(List<Map<String, Object>> tools) {
         List<Map<String, Object>> out = new ArrayList<>();
@@ -2841,9 +3532,11 @@ public class Agent {
     }
 
     /**
-     * OpenAI-compatible tools payload. On Moonshot/Kimi, inject builtin
-     * {@code $web_search} (first) and drop our local DuckDuckGo {@code web_search}
-     * so the model uses the official hosted search.
+     * 构建 OpenAI 兼容 tools payload。
+     * <p>Kimi/Moonshot 上：首位注入 builtin {@code $web_search}，移除本地 DuckDuckGo {@code web_search}，
+     * 迫使模型使用官方托管搜索。
+     *
+     * @return 发往 Chat Completions 的 tools 列表
      * @see <a href="https://platform.kimi.com/docs/guide/use-web-search">Kimi $web_search</a>
      */
     private List<Map<String, Object>> buildOpenAIToolsPayload() {
@@ -2862,13 +3555,20 @@ public class Agent {
             Map<String, Object> builtin = new LinkedHashMap<>();
             builtin.put("type", "builtin_function");
             builtin.put("function", fn);
-            out.add(builtin); // first — prefer hosted search
+            out.add(builtin); // 放在首位，优先引导模型使用托管搜索
             out.addAll(toOpenAITools(filtered));
             return out;
         }
         return toOpenAITools(active);
     }
 
+    /**
+     * 危险操作确认：先 UI 展示，再 confirmFn 或 stdin y/n。
+     *
+     * @param command 待确认操作描述
+     * @return {@code true} 用户允许
+     * @sideeffects 可能读取 stdin
+     */
     private boolean confirmDangerous(String command) {
         Ui.printConfirmation(command);
         if (confirmFn != null) {
@@ -2885,6 +3585,13 @@ public class Agent {
         }
     }
 
+    /**
+     * 便捷构造单条字符串 content 的消息 Map。
+     *
+     * @param role    user / assistant / system
+     * @param content 文本内容
+     * @return LinkedHashMap 消息
+     */
     private static Map<String, Object> msg(String role, String content) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("role", role);
@@ -2892,6 +3599,13 @@ public class Agent {
         return m;
     }
 
+    /**
+     * 从 JsonObject 安全读取 int 字段（缺失/null/异常 → 0）。
+     *
+     * @param obj JSON 对象
+     * @param key 字段名
+     * @return 整数值
+     */
     private static int optInt(JsonObject obj, String key) {
         if (obj == null || !obj.has(key) || obj.get(key).isJsonNull()) return 0;
         try {
@@ -2901,6 +3615,12 @@ public class Agent {
         }
     }
 
+    /**
+     * 将 Object（Number/String）转为 int（失败 → 0）。
+     *
+     * @param o 任意对象
+     * @return 整数值
+     */
     private static int asInt(Object o) {
         if (o instanceof Number) return ((Number) o).intValue();
         if (o == null) return 0;

@@ -15,17 +15,30 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 本地 Coding 场景的工作区允许列表与独占租约实现。
+ * 本地 Coding 场景的工作区沙箱与独占租约提供者。
  *
- * <p>路径先绝对化并规范化，再要求位于显式允许根目录且真实存在；空允许列表默认拒绝。
- * activeLeases 保证同一规范化路径同一时刻只交给一个运行，避免并发补丁相互污染。
- * 该隔离是进程内边界，生产环境仍应配合容器、文件权限和网络沙箱。</p>
+ * <p><b>实现双端口</b>：{@link SandboxPolicy}（路径是否允许）+
+ * {@link WorkspaceLease.Provider}（同一目录独占锁）。Coding Run 必须先 {@link #allows}
+ * 再通过 {@link #acquire} 获取租约，才能安全读写文件。</p>
+ *
+ * <p><b>配置</b>：{@code platform.sandbox.allowed-workspaces} 逗号分隔绝对/相对路径，
+ * 构造时规范化为绝对 Path 列表。空配置 = 拒绝一切工作区（fail-closed）。</p>
+ *
+ * <p><b>进程内局限</b>：{@code activeLeases} 不跨 JVM/容器；生产须叠加 OS 权限、
+ * 只读挂载、网络策略。本类是<b>必要非充分</b>条件。</p>
  */
 @Component
 public class LocalWorkspaceSecurity implements SandboxPolicy, WorkspaceLease.Provider {
+    /** 允许的工作区根目录列表（已 absolute + normalize） */
     private final List<Path> allowedRoots = new ArrayList<>();
+    /** 当前被租约占用的规范化路径集合；同一路径同时只允许一个 Run */
     private final Set<Path> activeLeases = ConcurrentHashMap.newKeySet();
 
+    /**
+     * 从配置解析允许根目录。
+     *
+     * @param configuredRoots {@code platform.sandbox.allowed-workspaces}，逗号分隔
+     */
     public LocalWorkspaceSecurity(
             @Value("${platform.sandbox.allowed-workspaces:}") String configuredRoots) {
         for (String root : configuredRoots.split(",")) {

@@ -25,6 +25,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 class LegacyAgentRuntimeTest {
 
+    /** 同 ExecutionContext 下第二次 execute 应复用 LegacyAgentSession，close 后 closed 标志为 true。 */
     @Test
     void adaptsLegacyResultReusesSessionAndClosesIt() {
         AtomicInteger creations = new AtomicInteger();
@@ -65,6 +66,7 @@ class LegacyAgentRuntimeTest {
         assertThat(closed).isTrue();
     }
 
+    /** API Key 为空时须在创建 LegacyAgent 之前抛 IllegalStateException（fail-closed）。 */
     @Test
     void failsClosedBeforeCreatingAgentWhenApiKeyIsMissing() {
         AtomicInteger creations = new AtomicInteger();
@@ -81,6 +83,7 @@ class LegacyAgentRuntimeTest {
         assertThat(creations).hasValue(0);
     }
 
+    /** 非默认工作区路径时旧引擎应拒绝，防止 sandbox 外文件访问。 */
     @Test
     void failsClosedForWorkspaceNotSupportedByLegacyEngine(@TempDir Path otherWorkspace) {
         LegacyAgentRuntime runtime = new LegacyAgentRuntime(settings -> {

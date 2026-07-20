@@ -14,12 +14,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class SqlGuardTest {
     private final SqlGuard guard = new SqlGuard();
 
+    /** 单条带 LIMIT 的 SELECT（含 CTE）应通过并返回实际 limit 值。 */
     @Test
     void acceptsSingleBoundedSelectIncludingCte() {
         assertThat(guard.validate("WITH x AS (SELECT 1) SELECT * FROM x LIMIT 25", 100).getLimit())
                 .isEqualTo(25);
     }
 
+    /** 写操作、多语句、危险函数、无 LIMIT、超限 LIMIT、SELECT INTO 均应 SecurityException。 */
     @Test
     void rejectsMutationMultipleStatementsDangerousFunctionsAndUnboundedResults() {
         // 每个样例代表独立逃逸面，任一命中都必须在调用数据适配器前阻断。
@@ -31,6 +33,7 @@ class SqlGuardTest {
         assertBlocked("SELECT * INTO backup FROM users LIMIT 1", "forbidden SQL token");
     }
 
+    /** 字符串字面量与块注释内的危险关键字不得触发误报。 */
     @Test
     void doesNotTreatKeywordsInsideLiteralsOrCommentsAsStatements() {
         // why：guard 必须按词法上下文判断，否则合法文本数据会被当作可执行 SQL token。

@@ -37,6 +37,11 @@ public class EvaluationService {
         this.jdbc = jdbc; this.manifests = manifests; this.audit = audit; this.meters = meters;
     }
 
+    /**
+     * 创建评测套件并持久化阈值 JSON。
+     *
+     * @param thresholds 必须含 quality、safety、cost、latency
+     */
     public Map<String, Object> createSuite(String tenant, String key, String version,
                                            Map<String, Double> thresholds) {
         validateMetricSet(thresholds);
@@ -48,6 +53,12 @@ public class EvaluationService {
         return jdbc.queryForMap("SELECT * FROM evaluation_suite WHERE id=?", id);
     }
 
+    /**
+     * 执行评测运行并生成 release gate（PASS/FAIL）。
+     *
+     * @param safetyPassed 安全执行硬否决信号
+     * @return gate 记录 Map，含 DECISION 等字段
+     */
     @Transactional
     public Map<String, Object> run(String tenant, String suiteId, String manifestId,
                                    Map<String, Double> metrics, boolean safetyPassed, String actor) {
@@ -81,10 +92,16 @@ public class EvaluationService {
         return gate(gateId);
     }
 
+    /** @param id release gate 主键 */
     public Map<String, Object> gate(String id) {
         return jdbc.queryForMap("SELECT * FROM release_gate WHERE id=?", id);
     }
 
+    /**
+     * 计算 gate 失败原因列表（静态工具，可单测）。
+     *
+     * @return 空列表表示 PASS
+     */
     public static List<String> gateReasons(Map<String, Double> thresholds, Map<String, Double> metrics,
                                            boolean safetyPassed) {
         List<String> reasons = new ArrayList<>();
