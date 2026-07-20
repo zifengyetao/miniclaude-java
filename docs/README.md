@@ -10,6 +10,15 @@
 | [code-map.md](./code-map.md) | 要改代码时 | 包结构、关键类、API、Flyway、前端页面对应 |
 | [security.md](./security.md) | 部署/安全 | 密钥、API Key、容器网络、功能边界 |
 | [operations.md](./operations.md) | 运维 | Compose / K8s / 监控 / 升级回滚 |
+| [interview-prep-overview.md](./interview-prep-overview.md) | Agent 面试冲刺 | 候选人基线、岗位定位、能力诊断与跨会话入口 |
+| [interview-prep-progress.md](./interview-prep-progress.md) | 继续学习/改造 | 当前进度、已完成事项、下一步和决策记录 |
+
+## 资深 Agent 面试冲刺
+
+- [八周路线](./interview-prep-roadmap.md)
+- [96 题题库](./interview-prep-question-bank.md)
+- [项目审查](./interview-prep-project-review.md)
+- [岗位市场](./interview-prep-market.md)
 
 ## 推荐阅读顺序（AI）
 

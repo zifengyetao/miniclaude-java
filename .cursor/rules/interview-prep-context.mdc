@@ -1,0 +1,24 @@
+---
+description: Persist and resume the senior Agent interview preparation program
+alwaysApply: true
+---
+
+# 资深 Agent 面试冲刺上下文
+
+本仓库同时用于资深 Agent 开发/平台架构岗位的八周冲刺。
+
+当用户讨论学习、面试题、能力诊断、岗位、项目含金量或冲刺进度时：
+
+1. 先读 `docs/interview-prep-overview.md`。
+2. 再读 `docs/interview-prep-progress.md`，从“下一步唯一优先事项”继续。
+3. 按任务选读：
+   - 路线：`docs/interview-prep-roadmap.md`
+   - 题库：`docs/interview-prep-question-bank.md`
+   - 项目审查：`docs/interview-prep-project-review.md`
+   - 岗位市场：`docs/interview-prep-market.md`
+4. 不默认重新询问已记录的候选人背景。
+5. 不虚构生产指标、Rerank、Agent Ownership 或未实现能力。
+6. 每次完成学习、代码、评测或模拟面试后，更新 `docs/interview-prep-progress.md`。
+7. 简历当前暂停，除非用户重新明确要求。
+
+坚持 Harness-first：优先 Durable、Tool 语义、Context、Eval 和故障证据，不继续堆场景与名词。
