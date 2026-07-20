@@ -8,6 +8,29 @@
 
 默认 `PLATFORM_ORCHESTRATOR=local`，由 `LocalDurableOrchestrator` 和 JDBC store 提供本地持久化执行、检查点、暂停、恢复与审批状态。这是当前私有化交付的可用基线，不依赖外部工作流服务。
 
+## Shared Agent Harness
+
+平台核心方向是 Harness-first，而不是 Graph-first：
+
+- `DefaultAgentHarness` 实现共享动态 Loop：Context → Model Turn → Tool Policy → Observation → Stop。
+- `HarnessProfileCatalog` 为 Data Analyst、Customer Support、Coding Agent 声明不同工具 Allowlist、
+  自治级别和预算；三者不复制 Loop。
+- `ControlledHarnessModelGateway`、`ControlledToolGateway` 默认拒绝未注册模型和工具。
+- `PolicyEngine` 在每次 Tool 执行前强制决策；`REQUIRE_APPROVAL` 停在 Harness 边界，不自动执行。
+- `HarnessEventSink` 输出结构化事件，不记录思维链和完整 Tool Output。
+- `GovernedHarnessObservationSink` 只把失败转为 L0 Observation，不能直接提案或发布。
+
+当前交付：
+
+- Phase H1 Core：Loop、Profile、完成验证、参数/顺序 Guard、Policy、事件和受控观察已经可测试。
+- Phase H2 部分完成：现有 ScenarioPorts 已注册成 Data/Support/Coding 安全工具，并提供
+  `HarnessScenarioService` Shadow 入口。
+- 场景 REST 主链仍走现有 Scenario Service/Legacy Runtime；尚缺生产模型 Turn Adapter、
+  Policy 参数规则和 Shadow Eval 后才允许灰度切流。
+
+`GraphRunner` 仅作为显式 Workflow Strategy：适合审批、监管和固定发布链路，不作为 Coding/Research
+类动态 Agent 的核心抽象。
+
 ## Temporal 边界
 
 `DurableOrchestrator` 是供应商无关端口。只有显式设置 `PLATFORM_ORCHESTRATOR=temporal` 时才创建 Temporal 客户端。当前仓库定义了客户端与 workflow 边界，但没有交付完整 Worker、Activity 注册、生产重试/版本策略，因此 Docker Compose 和 Kubernetes 默认均不启用 Temporal，不能把该模式视为生产可用。

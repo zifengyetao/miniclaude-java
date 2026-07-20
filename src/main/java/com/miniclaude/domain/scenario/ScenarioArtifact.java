@@ -53,6 +53,12 @@ public final class ScenarioArtifact {
          */
         ScenarioArtifact save(String tenantId, String runId, String type, String name, String content);
 
+        /**
+         * 使用调用方稳定幂等键保存；同键同内容返回原制品，同键不同内容必须拒绝。
+         */
+        ScenarioArtifact saveIdempotent(String tenantId, String runId, String type, String name,
+                                        String content, String idempotencyKey);
+
         /** 按 Run 查询全部 Artifact（审批/恢复/审计）。 */
         List<ScenarioArtifact> findByRun(String tenantId, String runId);
     }

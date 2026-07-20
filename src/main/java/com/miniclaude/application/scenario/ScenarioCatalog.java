@@ -33,10 +33,7 @@ public class ScenarioCatalog {
                 {"explore", "RETRIEVAL"}, {"plan", "PLANNER"}, {"lease", "POLICY"},
                 {"patch", "TOOL"}, {"verify", "VERIFIER"}, {"review", "VERIFIER"},
                 {"pr-draft", "TERMINAL"}});
-        register(ANALYST, "数据分析师", new String[][]{
-                {"sql-guard", "POLICY"}, {"metric", "RETRIEVAL"}, {"estimate", "DETERMINISTIC"},
-                {"approval", "APPROVAL"}, {"query", "TOOL"}, {"verify", "VERIFIER"},
-                {"report", "TERMINAL"}});
+        registerAnalyst();
         register(SUPPORT, "智能客服", new String[][]{
                 {"pii-mask", "POLICY"}, {"retrieve", "RETRIEVAL"}, {"compliance", "POLICY"},
                 {"draft", "LLM"}, {"confidence", "VERIFIER"}, {"handoff", "HUMAN_TASK"},
@@ -54,10 +51,39 @@ public class ScenarioCatalog {
         }
         GraphSpec graph = new GraphSpec(id + "-graph", "1.0.0", definitions[0][0], nodes, edges,
                 new GraphSpec.Limits(20, 1, new BigDecimal("5.00")));
+        register(id, name, graph);
+    }
+
+    /**
+     * 分析场景包含真实条件分支：低成本从 estimate 直接进入 query，高成本先进入 approval。
+     * 条件由 GraphRunner 对持久状态字段解释，服务层不得再用 if/else 决定下一节点。
+     */
+    private void registerAnalyst() {
+        List<GraphSpec.Node> nodes = Arrays.asList(
+                new GraphSpec.Node("sql-guard", GraphSpec.NodeType.POLICY, ANALYST + ".sql-guard@1.0.0"),
+                new GraphSpec.Node("metric", GraphSpec.NodeType.RETRIEVAL, ANALYST + ".metric@1.0.0"),
+                new GraphSpec.Node("estimate", GraphSpec.NodeType.DETERMINISTIC, ANALYST + ".estimate@1.0.0"),
+                new GraphSpec.Node("approval", GraphSpec.NodeType.APPROVAL, ANALYST + ".approval@1.0.0"),
+                new GraphSpec.Node("query", GraphSpec.NodeType.TOOL, ANALYST + ".query@1.0.0"),
+                new GraphSpec.Node("verify", GraphSpec.NodeType.VERIFIER, ANALYST + ".verify@1.0.0"),
+                new GraphSpec.Node("report", GraphSpec.NodeType.TERMINAL, ANALYST + ".report@1.0.0"));
+        List<GraphSpec.Edge> edges = Arrays.asList(
+                new GraphSpec.Edge("sql-guard", "metric", "always"),
+                new GraphSpec.Edge("metric", "estimate", "always"),
+                new GraphSpec.Edge("estimate", "approval", "approvalRequired=true"),
+                new GraphSpec.Edge("estimate", "query", "approvalRequired=false"),
+                new GraphSpec.Edge("approval", "query", "always"),
+                new GraphSpec.Edge("query", "verify", "always"),
+                new GraphSpec.Edge("verify", "report", "always"));
+        register(ANALYST, "数据分析师", new GraphSpec(ANALYST + "-graph", "1.1.0",
+                "sql-guard", nodes, edges, new GraphSpec.Limits(20, 1, new BigDecimal("5.00"))));
+    }
+
+    private void register(String id, String name, GraphSpec graph) {
         GraphValidationResult result = new GraphValidator().validate(graph);
         // why：错误的内置图属于部署配置错误，应在目录构造时失败，而不是运行中降级。
         if (!result.isValid()) throw new IllegalStateException("invalid built-in graph: " + result.getErrors());
-        RolePack pack = new RolePack(id, name, "1.0.0", ref(id + ".agent-spec"),
+        RolePack pack = new RolePack(id, name, graph.getVersion(), ref(id + ".agent-spec"),
                 graph, refs(id + ".safety", id + ".compliance"),
                 refs(id + ".workflow"), refs(id + ".output", id + ".safety"),
                 ref(id + ".eval-suite"));

@@ -5,12 +5,12 @@
 
 ## 当前状态
 
-- 阶段：Week 0 — 基线诊断与计划落地。
-- 状态：已完成。
+- 阶段：Week 1 — Harness 与 Agent Loop。
+- 状态：Shared Harness H1 完成、H2 Fake/Shadow 工具已接入；理论学习与口述答辩待进行。
 - 最近更新：2026-07-20。
 - 简历：按用户要求暂不处理。
 - 可投入时间：工作日每天 6 小时，周末默认不安排；每周约 30 小时。
-- 当前项目测试基线：`mvn test` 41/41 通过（2026-07-20 审查结果）。
+- 当前项目测试基线：`mvn test` 63/63 通过（2026-07-20 Harness H1/H2 改造后）。
 
 ## 已完成
 
@@ -19,7 +19,7 @@
 - [x] 明确主投 Agent 平台/Runtime 与企业智能体工程化。
 - [x] 完成截至 2026-07-20 的岗位样本调研。
 - [x] 审查当前项目的面试含金量和架构硬伤。
-- [x] 制定八周、约 176 小时的冲刺路线。
+- [x] 制定八周、约 240 小时的冲刺路线。
 - [x] 建立 96 道资深 Agent 面试题库。
 - [x] 将准备材料和进度机制落入仓库。
 
@@ -55,11 +55,17 @@
 
 项目任务：
 
-- [ ] 为当前项目画出 `Run → Step → Attempt → Observation → Artifact` 数据模型。
-- [ ] 对照现有 `AgentRun`、Event 和 Checkpoint，列出缺失字段。
-- [ ] 写 ADR：为何使用 Harness-first，以及哪些决策属于 LLM、哪些必须确定性执行。
-- [ ] 建立首批 30 条 `data-analyst` 任务集，先定义格式和成功判定。
-- [ ] 设计最小 `GraphRunner`，暂不直接堆完整功能。
+- [x] 为当前项目画出 `Run → Step → Attempt → Observation → Artifact` 数据模型。
+- [x] 对照现有 `AgentRun`、Event 和 Checkpoint，列出缺失字段。
+- [x] 写 ADR：为何使用 Harness-first，以及哪些决策属于 LLM、哪些必须确定性执行。
+- [x] 建立首批 30 条 `data-analyst` 任务集，定义格式和成功判定。
+- [x] 实现最小 `GraphRunner`，由 GraphSpec 驱动 Analyst 条件分支与恢复游标。
+- [x] 新增共享 `DefaultAgentHarness` 动态 Agent Loop。
+- [x] Data/Support/Coding 使用三个 Profile，共享 Context/Model/Tool/Policy/Stop/Event 控制面。
+- [x] 增加 Tool 参数/调用顺序 Guard 和确定性完成验证。
+- [x] 将现有 ScenarioPorts 注册成安全 Fake Harness Tools。
+- [x] Harness 失败只形成 L0 Observation，不允许在线自改或直接发布。
+- [x] 增加 ADR-002：Shared Harness 与受控自我升级。
 
 面试训练：
 
@@ -71,8 +77,8 @@
 ### Week 1 完成标准
 
 - [ ] 能在 10 分钟内讲清 DAG、Agent 和 Harness 的对应关系。
-- [ ] 有一份可评审的数据模型和 ADR。
-- [ ] 有 30 条版本化任务及明确判定器。
+- [x] 有一份可评审的数据模型和 ADR。
+- [x] 有 30 条版本化任务及确定性判定器。
 - [ ] 题 1～10 的平均掌握度至少达到 2。
 
 ## 决策记录
@@ -86,9 +92,10 @@
 ### 2026-07-20：项目策略
 
 - 当前项目约为 6.5/10 的面试原型。
-- 收缩为 `data-analyst` 黄金链路。
-- P0：Graph 真执行、崩溃恢复、Tool 事务语义、真实 Eval。
-- 暂停增加新场景、UI、多 Agent 角色和治理状态名。
+- 平台核心采用 Shared Harness/Agent Loop，Graph 仅作为审批、监管和固定 Workflow 策略。
+- Data/Support/Coding 不复制 Loop，通过 Profile、Tool、Policy 和 Verifier 区分。
+- 自我升级限定为 Observation → Candidate → Eval → Review → Shadow/Canary → Promote/Rollback。
+- 暂停增加 Graph DSL、UI、多 Agent 角色和无 Eval 的治理状态名。
 
 ### 2026-07-20：真实性边界
 
@@ -125,5 +132,12 @@
 - 完成候选人基线诊断、岗位调研、项目审查和八周路线。
 - 创建总览、路线、市场、项目审查、题库和进度文档。
 - 将时间预算调整为工作日 6 小时、周末默认不安排。
-- 下一步唯一优先事项：开始 Week 1，先完成 Harness/DAG 映射与数据模型，不立即大改代码。
+- 完成第一阶段项目改造：Analyst Graph 真执行、条件分支、Checkpoint 游标、Attempt 和状态哈希。
+- 新增 30 条固定 Eval 及确定性 Runner。
+- 补齐审批/终态原子提交、Graph/Hash/审批绑定、Report 原子发布与幂等；全量测试 48/48 通过。
+- 完成 Shared Harness H1 与 H2 Fake/Shadow Tool：完成验证、参数/顺序 Guard、不可覆盖路由、
+  服务端 SQL 上限、Context Workspace 绑定和稳定错误码。
+- 全量测试 63/63 通过；两轮 Reviewer 复核无残留 critical/high。
+- 下一步唯一优先事项：为 Harness 接入版本化 Model Turn Adapter 与 Shadow Eval，
+  再进入持久 Resume、Tool Receipt/Effect Ledger 和 UNKNOWN。
 

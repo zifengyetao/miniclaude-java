@@ -10,10 +10,10 @@ src/main/java/com/miniclaude/
   application/              # 用例服务
     chat/                   # ChatApplicationService
     scenario/               # Pilot / Regulated 场景
-    platform/               # 平台 Agent / Run
+    platform/               # 平台 Agent / Run / GraphRunner
     governance/             # 策略、审计、评测、进化
   domain/                   # 端口与模型（勿依赖 Spring）
-    runtime/                # AgentRuntime、ExecutionContext、网关端口
+    runtime/                # AgentRuntime、AgentHarness、ExecutionContext、网关端口
     durable/                # DurableOrchestrator、AgentRun、审批
     graph/                  # GraphSpec、验证器
     governance/             # Registry、Policy、Evolution 模型
@@ -58,6 +58,35 @@ db/migration/               # Flyway（在 resources 下）
 
 默认编排实现：`infrastructure.durable.LocalDurableOrchestrator`。
 
+Graph 执行：
+
+- `application/platform/GraphRunner.java` — 解释 `GraphSpec` 节点/条件边，持久化
+  next-node cursor、attempt、输入输出 hash，并从最新 checkpoint 恢复
+- `application/platform/GraphTerminalCommitter.java` — 将终态数据库制品与
+  Terminal checkpoint/SUCCEEDED 放在同一事务发布
+- `application/scenario/PilotScenarioService.java` — 提供 data-analyst 节点执行器；
+  Coding/Support 当前仍是服务内线性步进
+- `application/platform/GraphRuntime.java` — 早期单确定性节点运行时，当前场景主链使用 `GraphRunner`
+- `src/test/resources/eval/data-analyst-v1.jsonl` — 30 条 Analyst 固定评测集
+- `DataAnalystEvalDatasetTest.java` — 状态、路径、审批、制品和失败原因的确定性 Scorer
+- `docs/adr-001-harness-first-graph-runtime.md` — 数据模型、恢复语义、崩溃窗口与面试边界
+
+Shared Harness：
+
+- `domain/runtime/AgentHarness.java` — 共享 Loop 用例端口与结构化结果
+- `domain/runtime/HarnessProfile.java` — Role 能力、自治模式和预算
+- `domain/runtime/HarnessModelGateway.java` — 文本/Tool Call 模型 Turn 端口
+- `domain/runtime/HarnessEventSink.java` — Trace/Eval/Evolution 事件出口
+- `domain/runtime/ToolRegistry.java` — 不可覆盖的工具注册控制面端口
+- `application/platform/DefaultAgentHarness.java` — Context/Model/Policy/Tool/Observation Loop
+- `application/scenario/HarnessProfileCatalog.java` — Data/Support/Coding 三类 Profile
+- `application/scenario/ProfileHarnessControls.java` — Tool 参数/顺序 Guard 与完成验证
+- `application/scenario/HarnessScenarioToolRegistrar.java` — ScenarioPorts → 共享安全 Tools
+- `application/scenario/HarnessScenarioService.java` — 三场景 Harness Shadow 应用入口
+- `application/governance/GovernedHarnessObservationSink.java` — 失败轨迹 → L0 Observation
+- `infrastructure/runtime/ControlledHarnessModelGateway.java` — 模型白名单路由
+- `docs/adr-002-shared-agent-harness.md` — Harness-first 与受控自我升级决策
+
 ## Flyway
 
 `src/main/resources/db/migration/`
@@ -69,6 +98,7 @@ db/migration/               # Flyway（在 resources 下）
 | V3 | governance / registry |
 | V4 | evolution |
 | V5 | regulated 相关资产 |
+| V6 | 场景 Artifact 幂等键 |
 
 改表结构必须新迁移，勿改已发布脚本。
 

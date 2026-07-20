@@ -86,6 +86,24 @@ public interface DurableOrchestrator {
                         BigDecimal stepCostUsd, String idempotencyKey);
 
     /**
+     * 原子记录审批节点 checkpoint 并创建审批请求。
+     *
+     * <p>实现必须保证二者同事务提交，禁止出现「next-node 已推进但审批不存在」的绕过窗口。</p>
+     */
+    AgentRun recordStepAndAwaitApproval(String tenantId, String runId, String stepId, String state,
+                                        BigDecimal stepCostUsd, String actionType,
+                                        String actionParameters, Duration ttl,
+                                        String idempotencyKey);
+
+    /**
+     * 原子记录 TERMINAL 节点 checkpoint 并将 Run 转为成功终态。
+     *
+     * <p>实现必须保证二者同事务提交，禁止留下 next-node 为空但 Run 仍为 RUNNING 的孤儿状态。</p>
+     */
+    AgentRun recordTerminalStep(String tenantId, String runId, String stepId, String state,
+                                BigDecimal stepCostUsd, String idempotencyKey);
+
+    /**
      * 保存最终状态并将运行转换为成功终态。
      * <p>
      * <b>转移：</b>→ {@link AgentRun.Status#SUCCEEDED}。

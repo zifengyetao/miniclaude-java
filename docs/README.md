@@ -19,6 +19,8 @@
 - [96 题题库](./interview-prep-question-bank.md)
 - [项目审查](./interview-prep-project-review.md)
 - [岗位市场](./interview-prep-market.md)
+- [ADR-001 Harness-first Graph Runtime](./adr-001-harness-first-graph-runtime.md)
+- [ADR-002 Shared Agent Harness](./adr-002-shared-agent-harness.md)
 
 ## 推荐阅读顺序（AI）
 

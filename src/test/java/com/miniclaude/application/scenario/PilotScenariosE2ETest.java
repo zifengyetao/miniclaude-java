@@ -2,20 +2,29 @@ package com.miniclaude.application.scenario;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.miniclaude.application.platform.GraphRunner;
 import com.miniclaude.domain.durable.ApprovalRequest;
 import com.miniclaude.domain.durable.DurableStores;
+import com.miniclaude.domain.durable.RunCheckpoint;
+import com.miniclaude.domain.graph.GraphSpec;
+import com.miniclaude.domain.scenario.RolePack;
+import com.miniclaude.domain.scenario.ScenarioArtifact;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -44,6 +53,12 @@ class PilotScenariosE2ETest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
     @Autowired DurableStores.ApprovalService approvals;
+    @Autowired DurableStores.CheckpointStore checkpoints;
+    @Autowired ScenarioArtifact.Repository artifacts;
+    @Autowired PilotScenarioService scenarios;
+    @Autowired ScenarioCatalog catalog;
+    @Autowired GraphRunner graphRunner;
+    @Autowired JdbcTemplate jdbc;
 
     /** GET /scenarios/templates 应返回 3 个版本 pinned 的 RolePack。 */
     @Test
@@ -53,7 +68,9 @@ class PilotScenariosE2ETest {
                 .andExpect(jsonPath("$.length()").value(3))
                 .andExpect(jsonPath("$[0].version").value("1.0.0"))
                 .andExpect(jsonPath("$[0].agentSpec.version").value("1.0.0"))
-                .andExpect(jsonPath("$[0].graph.entryNode").isNotEmpty());
+                .andExpect(jsonPath("$[0].graph.entryNode").isNotEmpty())
+                .andExpect(jsonPath("$[1].version").value("1.1.0"))
+                .andExpect(jsonPath("$[1].graph.version").value("1.1.0"));
     }
 
     /** coding-agent 成功时应产出 PATCH_PROPOSAL/PR_DRAFT 且 externalPrCreated=false。 */
@@ -91,10 +108,23 @@ class PilotScenariosE2ETest {
                 "{\"goal\":\"revenue\",\"metric\":\"net_revenue\","
                         + "\"sql\":\"SELECT sum(amount) FROM sales LIMIT 100\"}");
         assertThat(success.get("status").asText()).isEqualTo("SUCCEEDED");
+        assertThat(stepIds(checkpoints.findCheckpoints("default", success.get("id").asText())))
+                .containsExactly("sql-guard", "metric", "estimate", "query", "verify", "report", "terminal");
         mvc.perform(get("/api/v1/scenarios/data-analyst/runs/{id}/artifacts", success.get("id").asText()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.type == 'REPORT')].content").value(
                         org.hamcrest.Matchers.hasItem(org.hamcrest.Matchers.containsString("\"externalDbConnected\":false"))));
+        ScenarioArtifact report = artifacts.findByRun("default", success.get("id").asText()).stream()
+                .filter(artifact -> "REPORT".equals(artifact.getType())).findFirst().orElseThrow(AssertionError::new);
+        ScenarioArtifact replayed = artifacts.saveIdempotent("default", success.get("id").asText(),
+                report.getType(), report.getName(), report.getContent(),
+                "graph:" + success.get("id").asText() + ":report:artifact");
+        assertThat(replayed.getId()).isEqualTo(report.getId());
+        assertThatThrownBy(() -> artifacts.saveIdempotent("default", success.get("id").asText(),
+                report.getType(), report.getName(), "{\"changed\":true}",
+                "graph:" + success.get("id").asText() + ":report:artifact"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("different payload");
 
         // 多语句中夹带 DELETE，用于证明只读 guard 不会只检查首个 SELECT。
         JsonNode blocked = start("data-analyst",
@@ -109,6 +139,25 @@ class PilotScenariosE2ETest {
         JsonNode waiting = start("data-analyst",
                 "{\"metric\":\"costly\",\"sql\":\"SELECT * FROM expensive_table LIMIT 10\"}");
         assertThat(waiting.get("status").asText()).isEqualTo("WAITING_APPROVAL");
+        List<RunCheckpoint> beforeResume = checkpoints.findCheckpoints(
+                "default", waiting.get("id").asText());
+        assertThat(stepIds(beforeResume)).containsExactly("sql-guard", "metric", "estimate", "approval");
+        JsonNode cursor = json.readTree(beforeResume.get(beforeResume.size() - 1).getState());
+        assertThat(cursor.get("_nextNode").asText()).isEqualTo("query");
+        assertThat(cursor.get("_attempt").asInt()).isEqualTo(1);
+        assertThat(cursor.get("_inputHash").asText()).hasSize(64);
+        assertThat(cursor.get("_outputHash").asText()).hasSize(64);
+        assertThat(cursor.get("_graphVersion").asText()).isEqualTo("1.1.0");
+        RolePack analyst = catalog.get(ScenarioCatalog.ANALYST);
+        GraphSpec drifted = new GraphSpec(analyst.getGraph().getName(), "9.0.0",
+                analyst.getGraph().getEntryNode(),
+                new java.util.ArrayList<>(analyst.getGraph().getNodes().values()),
+                analyst.getGraph().getEdges(), analyst.getGraph().getLimits());
+        assertThatThrownBy(() -> graphRunner.loadCheckpointState(
+                drifted, "default", waiting.get("id").asText()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("graph version mismatch");
+
         ApprovalRequest approval = approvals.findApprovals("default", waiting.get("id").asText()).get(0);
         approvals.decide("default", approval.getId(), approval.getActionParameters(),
                 ApprovalRequest.Status.APPROVED, "test-operator", "approved in test");
@@ -116,6 +165,43 @@ class PilotScenariosE2ETest {
         mvc.perform(post("/api/v1/scenarios/data-analyst/runs/{id}/continue", waiting.get("id").asText()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("SUCCEEDED"));
+        assertThat(stepIds(checkpoints.findCheckpoints("default", waiting.get("id").asText())))
+                .containsExactly("sql-guard", "metric", "estimate", "approval",
+                        "query", "verify", "report", "terminal");
+        assertThatThrownBy(() -> scenarios.continueRun(
+                "default", ScenarioCatalog.ANALYST, waiting.get("id").asText()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("approval boundary");
+        assertThat(artifacts.findByRun("default", waiting.get("id").asText()).stream()
+                .filter(artifact -> "REPORT".equals(artifact.getType()))).hasSize(1);
+    }
+
+    /** Analyst continue 入口不得恢复其他场景的 Run。 */
+    @Test
+    void analystContinueRejectsRunOwnedByAnotherScenario() throws Exception {
+        JsonNode coding = start("coding-agent", "{\"workspace\":\"" + escape(WORKSPACE.toString())
+                + "\",\"goal\":\"safe change\",\"branch\":\"feature/owner-check\"}");
+        assertThatThrownBy(() -> scenarios.continueRun(
+                "default", ScenarioCatalog.ANALYST, coding.get("id").asText()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not owned by data-analyst");
+    }
+
+    /** 恢复前必须重算 Checkpoint stateHash，拒绝数据库中的状态漂移。 */
+    @Test
+    void analystResumeRejectsTamperedCheckpointState() throws Exception {
+        JsonNode waiting = start("data-analyst",
+                "{\"metric\":\"costly\",\"sql\":\"SELECT * FROM expensive_table LIMIT 10\"}");
+        RunCheckpoint latest = checkpoints.latest("default", waiting.get("id").asText())
+                .orElseThrow(AssertionError::new);
+        jdbc.update("UPDATE run_checkpoint SET state_payload=? WHERE id=?",
+                "{\"tampered\":true}", latest.getId());
+
+        assertThatThrownBy(() -> graphRunner.loadCheckpointState(
+                catalog.get(ScenarioCatalog.ANALYST).getGraph(),
+                "default", waiting.get("id").asText()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("state hash mismatch");
     }
 
     /** 客服场景 PII 掩码、永不 sent；高敏意图转 HUMAN_SUPPORT_HANDOFF 审批。 */
@@ -151,6 +237,10 @@ class PilotScenariosE2ETest {
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
+    }
+
+    private static List<String> stepIds(List<RunCheckpoint> checkpoints) {
+        return checkpoints.stream().map(RunCheckpoint::getStepId).collect(Collectors.toList());
     }
 
     private static String escape(String value) { return value.replace("\\", "\\\\").replace("\"", "\\\""); }

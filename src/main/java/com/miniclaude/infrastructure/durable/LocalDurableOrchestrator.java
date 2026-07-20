@@ -161,6 +161,35 @@ public class LocalDurableOrchestrator implements DurableOrchestrator {
 
     @Override
     @Transactional
+    public AgentRun recordStepAndAwaitApproval(String tenantId, String runId, String stepId,
+                                               String state, BigDecimal stepCost,
+                                               String actionType, String actionParameters,
+                                               Duration ttl, String key) {
+        // 外层事务覆盖步骤 checkpoint、状态转换和审批记录；任一写入失败时整体回滚。
+        AgentRun stepped = recordStep(tenantId, runId, stepId, state, stepCost, key);
+        if (stepped.getStatus() != AgentRun.Status.RUNNING
+                && stepped.getStatus() != AgentRun.Status.WAITING_APPROVAL) {
+            throw new IllegalStateException("run stopped before approval: " + stepped.getStatus());
+        }
+        awaitApproval(tenantId, runId, stepId, actionType, actionParameters, ttl, key + ":approval");
+        return required(tenantId, runId);
+    }
+
+    @Override
+    @Transactional
+    public AgentRun recordTerminalStep(String tenantId, String runId, String stepId, String state,
+                                       BigDecimal stepCost, String key) {
+        // TERMINAL checkpoint 与 SUCCEEDED 状态共享事务，不暴露无 next-node 的 RUNNING 快照。
+        AgentRun stepped = recordStep(tenantId, runId, stepId, state, stepCost, key);
+        if (stepped.getStatus() == AgentRun.Status.SUCCEEDED) return stepped;
+        if (stepped.getStatus() != AgentRun.Status.RUNNING) {
+            throw new IllegalStateException("run stopped before completion: " + stepped.getStatus());
+        }
+        return complete(tenantId, runId, state, key + ":complete");
+    }
+
+    @Override
+    @Transactional
     public AgentRun complete(String tenantId, String runId, String state, String key) {
         if (replayed(tenantId, runId, key)) return required(tenantId, runId);
         AgentRun run = required(tenantId, runId);

@@ -12,7 +12,7 @@
 | 后端分层 | `interfaces → application → domain ← infrastructure` |
 | 编排 | 默认 `PLATFORM_ORCHESTRATOR=local`（JDBC 持久化）；Temporal 仅边界，非默认生产 |
 | 前端 | `web-console/` React + TypeScript + Vite |
-| 数据 | PostgreSQL（Compose/K8s）或本地 H2；Flyway V1–V5 |
+| 数据 | PostgreSQL（Compose/K8s）或本地 H2；Flyway V1–V6 |
 | 语言 | 对用户回复中文 |
 
 ## 硬约束（不要违反）
@@ -23,7 +23,7 @@
 4. 自进化 L0–L3；**L4 禁止**；候选须评测 → 评审 → 灰度 → 晋升。
 5. Harness-first：确定性控制面（策略/审批/验证）包住概率模型。
 
-## 两条主执行路径
+## 执行路径
 
 ```
 路径 A — Chat
@@ -31,7 +31,11 @@
 
 路径 B — 场景 / 数字员工 Run
   *ScenarioController → *ScenarioService → DurableOrchestrator → 步进 + 审批 + Artifact
-  （RolePack + GraphSpec 定义节点；当前多为服务内线性步进，对齐 Graph）
+  （RolePack + GraphSpec 定义节点；data-analyst 由 GraphRunner 执行，其他场景仍为服务内线性步进）
+
+路径 C — Shared Harness Core（Phase H1，尚未切换 REST 主链）
+  AgentHarness → DefaultAgentHarness → Context → Model Turn → Policy → Tool → Observation
+  Data / Support / Coding 共享 Loop，通过 HarnessProfile 区分能力和自治边界
 ```
 
 ## 场景 ID 速查

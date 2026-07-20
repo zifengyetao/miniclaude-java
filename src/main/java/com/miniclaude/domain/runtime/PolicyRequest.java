@@ -1,5 +1,8 @@
 package com.miniclaude.domain.runtime;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -19,11 +22,20 @@ public final class PolicyRequest {
     private final String action;
     /** 资源标识（如 path、instrument、customerId）。 */
     private final String resource;
+    /** 供策略检查的结构化动作参数（不可变顶层副本）。 */
+    private final Map<String, Object> arguments;
 
     public PolicyRequest(ExecutionContext context, String action, String resource) {
+        this(context, action, resource, Collections.emptyMap());
+    }
+
+    public PolicyRequest(ExecutionContext context, String action, String resource,
+                         Map<String, Object> arguments) {
         this.context = Objects.requireNonNull(context, "context");
         this.action = requireText(action, "action");
         this.resource = requireText(resource, "resource");
+        this.arguments = Collections.unmodifiableMap(new LinkedHashMap<>(
+                arguments == null ? Collections.emptyMap() : arguments));
     }
 
     /** @return 执行上下文 */
@@ -39,6 +51,11 @@ public final class PolicyRequest {
     /** @return 资源 */
     public String getResource() {
         return resource;
+    }
+
+    /** @return Tool/动作参数；策略实现不得记录密钥类值 */
+    public Map<String, Object> getArguments() {
+        return arguments;
     }
 
     private static String requireText(String value, String name) {

@@ -1,9 +1,9 @@
 package com.miniclaude.application.scenario;
 
 import com.google.gson.Gson;
-import com.google.gson.reflect.TypeToken;
 import com.miniclaude.application.governance.AuditService;
 import com.miniclaude.application.platform.AgentPlatformService;
+import com.miniclaude.application.platform.GraphRunner;
 import com.miniclaude.domain.durable.ApprovalRequest;
 import com.miniclaude.domain.durable.DurableOrchestrator;
 import com.miniclaude.domain.durable.DurableStores;
@@ -22,7 +22,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,6 +48,7 @@ public class PilotScenarioService {
     private final ScenarioCatalog catalog;
     private final AgentPlatformService platform;
     private final DurableOrchestrator orchestrator;
+    private final GraphRunner graphRunner;
     private final DurableStores.ApprovalService approvals;
     private final WorkspaceLease.Provider leases;
     private final ScenarioPorts.CodingRepository coding;
@@ -60,12 +63,14 @@ public class PilotScenarioService {
     private final Gson gson = new Gson();
 
     public PilotScenarioService(ScenarioCatalog catalog, AgentPlatformService platform,
-            DurableOrchestrator orchestrator, DurableStores.ApprovalService approvals,
+            DurableOrchestrator orchestrator, GraphRunner graphRunner,
+            DurableStores.ApprovalService approvals,
             WorkspaceLease.Provider leases, ScenarioPorts.CodingRepository coding,
             ScenarioPorts.AnalyticsData analytics, ScenarioPorts.KnowledgeRetrieval knowledge,
             ScenarioArtifact.Repository artifacts, AuditService audit, MeterRegistry meters,
             @Value("${platform.scenarios.analytics.approval-threshold-usd:5.00}") BigDecimal threshold) {
         this.catalog = catalog; this.platform = platform; this.orchestrator = orchestrator;
+        this.graphRunner = graphRunner;
         this.approvals = approvals; this.leases = leases; this.coding = coding; this.analytics = analytics;
         this.knowledge = knowledge; this.artifacts = artifacts; this.audit = audit; this.meters = meters;
         this.approvalThreshold = threshold;
@@ -101,7 +106,7 @@ public class PilotScenarioService {
      * 继续已暂停的 Run（仅 data-analyst 成本审批场景）。
      *
      * @throws IllegalArgumentException 非 analyst 场景
-     * @throws IllegalStateException 未获批或缺少 ANALYSIS_REQUEST 制品
+     * @throws IllegalStateException Run/Graph/审批与当前 Analyst 请求不完全绑定
      */
     public AgentRun continueRun(String tenant, String scenario, String runId) {
         if (!ScenarioCatalog.ANALYST.equals(scenario)) {
@@ -109,16 +114,35 @@ public class PilotScenarioService {
         }
         AgentRun run = platform.getRun(runId);
         requireTenant(tenant, run);
+        RolePack pack = catalog.get(ScenarioCatalog.ANALYST);
+        if (!run.getAgentId().equals(agentId(pack.getName()))) {
+            throw new IllegalStateException("run is not owned by data-analyst");
+        }
+        Map<String, Object> state = graphRunner.loadCheckpointState(pack.getGraph(), tenant, runId);
+        if (!"approval".equals(state.get("_completedNode")) || !"query".equals(state.get("_nextNode"))) {
+            throw new IllegalStateException("run is not at analyst approval boundary");
+        }
+        String expectedParameters = required(state, "approvalParameters");
         boolean approved = approvals.findApprovals(tenant, runId).stream()
-                .anyMatch(a -> a.getStatus() == ApprovalRequest.Status.APPROVED);
-        if (!approved) throw new IllegalStateException("approved cost request required");
-        ScenarioArtifact request = artifacts.findByRun(tenant, runId).stream()
-                .filter(a -> "ANALYSIS_REQUEST".equals(a.getType())).findFirst()
-                .orElseThrow(() -> new IllegalStateException("analysis request artifact missing"));
-        Map<String, Object> input = gson.fromJson(request.getContent(),
-                new TypeToken<Map<String, Object>>() {}.getType());
+                .anyMatch(approval -> approval.getStatus() == ApprovalRequest.Status.APPROVED
+                        && "approval".equals(approval.getStepId())
+                        && "ANALYTICS_QUERY_COST".equals(approval.getActionType())
+                        && expectedParameters.equals(approval.getActionParameters()));
+        if (!approved) throw new IllegalStateException("bound analyst cost approval required");
+
         orchestrator.resume(tenant, runId, key(runId, "resume"));
-        finishAnalyst(tenant, run, input);
+        try {
+            GraphRunner.Result result = graphRunner.resume(pack.getGraph(), tenant, runId,
+                    this::executeAnalystNode);
+            if (result.isCompleted()) {
+                metric(ScenarioCatalog.ANALYST, "success");
+                audit(tenant, run, "SCENARIO_COMPLETED", "ALLOW");
+            }
+        } catch (RuntimeException failed) {
+            orchestrator.fail(tenant, runId, failed.getMessage(), key(runId, "resume-failed"));
+            audit(tenant, run, "SCENARIO_BLOCKED", "DENY");
+            throw failed;
+        }
         return platform.getRun(runId);
     }
 
@@ -179,47 +203,91 @@ public class PilotScenarioService {
     }
 
     private void executeAnalyst(String tenant, AgentRun run, Map<String, Object> input) {
-        String sql = required(input, "sql");
-        int maxRows = number(input, "maxRows", 1000).intValue();
-        // guard 在成本估算前执行，避免危险 SQL 即使只送往估算端口也越过边界。
-        SqlGuard.GuardedSql guarded = sqlGuard.validate(sql, maxRows);
-        step(tenant, run, "sql-guard", map("readOnly", true, "limit", guarded.getLimit()));
-        String metric = required(input, "metric");
-        step(tenant, run, "metric", map("definition", analytics.metricDefinition(metric)));
-        ScenarioPorts.CostEstimate estimate = analytics.estimate(guarded.getSql());
-        step(tenant, run, "estimate", map("scannedBytes", estimate.scannedBytes,
-                "estimatedUsd", estimate.estimatedUsd));
+        required(input, "sql");
+        required(input, "metric");
+        // 原始请求作为审计制品保存；恢复的执行位置和状态只以 Graph checkpoint 为准。
         artifacts.save(tenant, run.getId(), "ANALYSIS_REQUEST", "analysis-request.json", gson.toJson(input));
-        if (estimate.estimatedUsd.compareTo(approvalThreshold) > 0) {
-            // why：高成本查询先持久化请求并暂停，获批前不会调用 executeReadOnly。
-            orchestrator.awaitApproval(tenant, run.getId(), "approval", "ANALYTICS_QUERY_COST",
-                    gson.toJson(map("sqlHash", Integer.toHexString(sql.hashCode()),
-                            "estimatedUsd", estimate.estimatedUsd)), Duration.ofMinutes(15),
-                    key(run.getId(), "approval"));
+        GraphRunner.Result result = graphRunner.start(catalog.get(ScenarioCatalog.ANALYST).getGraph(),
+                tenant, run.getId(), input, this::executeAnalystNode);
+        if (result.isSuspended()) {
             metric(ScenarioCatalog.ANALYST, "approval");
             audit(tenant, run, "ANALYTICS_COST_APPROVAL_REQUIRED", "PENDING");
-            return;
+        } else if (result.isCompleted()) {
+            metric(ScenarioCatalog.ANALYST, "success");
+            audit(tenant, run, "SCENARIO_COMPLETED", "ALLOW");
         }
-        finishAnalyst(tenant, run, input);
     }
 
-    private void finishAnalyst(String tenant, AgentRun run, Map<String, Object> input) {
-        // 恢复后再次校验，不信任等待审批期间保存的输入仍天然安全。
-        SqlGuard.GuardedSql guarded = sqlGuard.validate(required(input, "sql"),
-                number(input, "maxRows", 1000).intValue());
-        ScenarioPorts.QueryResult result = analytics.executeReadOnly(guarded.getSql(), guarded.getLimit());
-        step(tenant, run, "query", map("rows", result.rows.size(), "adapter", "CONTROLLED_FAKE"));
-        if (result.rows.size() > guarded.getLimit() || result.citations == null || result.citations.isEmpty()) {
-            // why：超行数或无引用结果不可形成报告，防止 fake/生产适配器违反端口契约。
-            throw new IllegalStateException("result/citation verification failed");
+    private GraphRunner.NodeResult executeAnalystNode(GraphRunner.NodeContext context) {
+        Map<String, Object> state = context.getState();
+        String node = context.getNode().getId();
+        switch (node) {
+            case "sql-guard": {
+                // guard 在任何估算或查询前执行；恢复后 query 节点还会再次校验原始 SQL。
+                SqlGuard.GuardedSql guarded = sqlGuard.validate(required(state, "sql"),
+                        number(state, "maxRows", 1000).intValue());
+                return GraphRunner.NodeResult.continueWith(map(
+                        "guardedSql", guarded.getSql(), "limit", guarded.getLimit(), "readOnly", true));
+            }
+            case "metric":
+                return GraphRunner.NodeResult.continueWith(map(
+                        "metricDefinition", analytics.metricDefinition(required(state, "metric"))));
+            case "estimate": {
+                ScenarioPorts.CostEstimate estimate = analytics.estimate(required(state, "guardedSql"));
+                boolean approvalRequired = estimate.estimatedUsd.compareTo(approvalThreshold) > 0;
+                return GraphRunner.NodeResult.continueWith(map(
+                        "scannedBytes", estimate.scannedBytes,
+                        "estimatedUsd", estimate.estimatedUsd,
+                        "approvalRequired", approvalRequired));
+            }
+            case "approval": {
+                String parameters = gson.toJson(map(
+                        "sqlHash", sha256(required(state, "guardedSql")),
+                        "estimatedUsd", state.get("estimatedUsd")));
+                return GraphRunner.NodeResult.awaitApproval(
+                        map("approvalRequired", true, "approvalParameters", parameters),
+                        "ANALYTICS_QUERY_COST", parameters, Duration.ofMinutes(15));
+            }
+            case "query": {
+                // 不信任审批等待期间持久状态天然安全，执行外部读取前重新从原始输入校验。
+                SqlGuard.GuardedSql guarded = sqlGuard.validate(required(state, "sql"),
+                        number(state, "maxRows", 1000).intValue());
+                ScenarioPorts.QueryResult result = analytics.executeReadOnly(
+                        guarded.getSql(), guarded.getLimit());
+                return GraphRunner.NodeResult.continueWith(map(
+                        "rows", result.rows,
+                        "rowCount", result.rows.size(),
+                        "citations", result.citations,
+                        "adapter", "CONTROLLED_FAKE"));
+            }
+            case "verify": {
+                List<?> rows = list(state, "rows");
+                List<?> citations = list(state, "citations");
+                int limit = number(state, "limit", 1000).intValue();
+                if (rows.size() > limit || citations.isEmpty()) {
+                    throw new IllegalStateException("result/citation verification failed");
+                }
+                return GraphRunner.NodeResult.continueWith(map("verified", true));
+            }
+            case "report":
+                if (!Boolean.TRUE.equals(state.get("verified"))) {
+                    throw new IllegalStateException("verified result required");
+                }
+                String report = gson.toJson(map(
+                        "metric", required(state, "metric"),
+                        "metricDefinition", state.get("metricDefinition"),
+                        "rows", list(state, "rows"),
+                        "citations", list(state, "citations"),
+                        "externalDbConnected", false));
+                return GraphRunner.NodeResult.terminalWith(
+                        map("artifact", "analysis-report.json", "reportVerified", true),
+                        () -> artifacts.saveIdempotent(
+                                context.getTenantId(), context.getRunId(), "REPORT",
+                                "analysis-report.json", report,
+                                "graph:" + context.getRunId() + ":report:artifact"));
+            default:
+                throw new IllegalStateException("unsupported analyst node: " + node);
         }
-        step(tenant, run, "verify", map("citations", result.citations, "verified", true));
-        artifacts.save(tenant, run.getId(), "REPORT", "analysis-report.json",
-                gson.toJson(map("metric", required(input, "metric"),
-                        "metricDefinition", analytics.metricDefinition(required(input, "metric")),
-                        "rows", result.rows, "citations", result.citations, "externalDbConnected", false)));
-        step(tenant, run, "report", map("artifact", "analysis-report.json", "verified", true));
-        complete(tenant, run, ScenarioCatalog.ANALYST);
     }
 
     private void executeSupport(String tenant, AgentRun run, Map<String, Object> input) {
@@ -311,6 +379,22 @@ public class PilotScenarioService {
         if (value == null) return fallback;
         if (value instanceof Number) return (Number) value;
         return new BigDecimal(value.toString());
+    }
+    private static List<?> list(Map<String, Object> input, String name) {
+        Object value = input == null ? null : input.get(name);
+        if (!(value instanceof List)) throw new IllegalStateException(name + " list required");
+        return (List<?>) value;
+    }
+    private static String sha256(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder result = new StringBuilder(digest.length * 2);
+            for (byte item : digest) result.append(String.format("%02x", item & 0xff));
+            return result.toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("cannot hash sql", e);
+        }
     }
     private static Map<String, Object> map(Object... pairs) {
         Map<String, Object> map = new LinkedHashMap<>();

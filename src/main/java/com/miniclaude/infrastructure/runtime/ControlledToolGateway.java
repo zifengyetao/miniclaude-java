@@ -1,6 +1,7 @@
 package com.miniclaude.infrastructure.runtime;
 
 import com.miniclaude.domain.runtime.ToolGateway;
+import com.miniclaude.domain.runtime.ToolRegistry;
 import com.miniclaude.domain.runtime.ToolRequest;
 import com.miniclaude.domain.runtime.ToolResult;
 import org.springframework.stereotype.Component;
@@ -19,7 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 路由模式，符合 {@code docs/overview.md} 控制面包住概率模型的原则。</p>
  */
 @Component
-public class ControlledToolGateway implements ToolGateway {
+public class ControlledToolGateway implements ToolGateway, ToolRegistry {
     /** 工具名 → 实际网关实现；{@link ConcurrentHashMap} 支持运行时注册与并发读 */
     private final Map<String, ToolGateway> routes = new ConcurrentHashMap<>();
 
@@ -27,11 +28,15 @@ public class ControlledToolGateway implements ToolGateway {
      * 注册或替换工具路由。名称和网关必须有效；覆盖注册不是条件更新，
      * 并发调用时最后完成的写入生效。
      */
+    @Override
     public void register(String toolName, ToolGateway gateway) {
         if (toolName == null || toolName.trim().isEmpty() || gateway == null) {
             throw new IllegalArgumentException("tool route and gateway are required");
         }
-        routes.put(toolName.trim(), gateway);
+        ToolGateway existing = routes.putIfAbsent(toolName.trim(), gateway);
+        if (existing != null) {
+            throw new IllegalStateException("tool route is already registered");
+        }
     }
 
     /**

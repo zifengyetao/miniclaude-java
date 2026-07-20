@@ -104,6 +104,61 @@ class DurableExecutionTest {
         assertThat(stopped.getCostUsd()).isEqualByComparingTo("0.51");
     }
 
+    /** 审批节点的 checkpoint、WAITING 状态和 Approval 必须原子形成且可幂等重放。 */
+    @Test
+    void atomicallyRecordsApprovalStepAndRequest() {
+        AgentRun run = create(new BigDecimal("10"));
+        AgentRun waiting = orchestrator.recordStepAndAwaitApproval(
+                "tenant-a", run.getId(), "approval", "{\"_nextNode\":\"query\"}",
+                BigDecimal.ZERO, "ANALYTICS_QUERY_COST", "{\"sqlHash\":\"abc\"}",
+                Duration.ofMinutes(5), "approval-step-1");
+        AgentRun replayed = orchestrator.recordStepAndAwaitApproval(
+                "tenant-a", run.getId(), "approval", "{\"_nextNode\":\"query\"}",
+                BigDecimal.ZERO, "ANALYTICS_QUERY_COST", "{\"sqlHash\":\"abc\"}",
+                Duration.ofMinutes(5), "approval-step-1");
+
+        assertThat(waiting.getStatus()).isEqualTo(AgentRun.Status.WAITING_APPROVAL);
+        assertThat(replayed.getStatus()).isEqualTo(AgentRun.Status.WAITING_APPROVAL);
+        assertThat(checkpoints.findCheckpoints("tenant-a", run.getId())).hasSize(1);
+        assertThat(approvals.findApprovals("tenant-a", run.getId())).hasSize(1);
+    }
+
+    /** 审批创建失败时，前置 Step/Checkpoint/状态更新必须整体回滚。 */
+    @Test
+    void rollsBackApprovalStepWhenApprovalRequestFails() {
+        AgentRun run = create(new BigDecimal("10"));
+
+        assertThatThrownBy(() -> orchestrator.recordStepAndAwaitApproval(
+                "tenant-a", run.getId(), "approval", "{\"_nextNode\":\"query\"}",
+                BigDecimal.ZERO, "ANALYTICS_QUERY_COST", "{\"sqlHash\":\"abc\"}",
+                Duration.ZERO, "approval-step-invalid"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("ttl");
+
+        assertThat(platform.getRun(run.getId()).getStatus()).isEqualTo(AgentRun.Status.PENDING);
+        assertThat(checkpoints.findCheckpoints("tenant-a", run.getId())).isEmpty();
+        assertThat(approvals.findApprovals("tenant-a", run.getId())).isEmpty();
+        assertThat(events.findEvents("tenant-a", run.getId())).hasSize(1);
+    }
+
+    /** TERMINAL 节点 checkpoint 与 SUCCEEDED 必须在同一编排命令中提交并可重放。 */
+    @Test
+    void atomicallyRecordsTerminalStepAndCompletion() {
+        AgentRun run = create(new BigDecimal("10"));
+        AgentRun completed = orchestrator.recordTerminalStep(
+                "tenant-a", run.getId(), "report", "{\"_nextNode\":null}",
+                BigDecimal.ZERO, "terminal-step-1");
+        AgentRun replayed = orchestrator.recordTerminalStep(
+                "tenant-a", run.getId(), "report", "{\"_nextNode\":null}",
+                BigDecimal.ZERO, "terminal-step-1");
+
+        assertThat(completed.getStatus()).isEqualTo(AgentRun.Status.SUCCEEDED);
+        assertThat(replayed.getStatus()).isEqualTo(AgentRun.Status.SUCCEEDED);
+        assertThat(checkpoints.findCheckpoints("tenant-a", run.getId()).stream()
+                .map(checkpoint -> checkpoint.getStepId()))
+                .containsExactly("report", "terminal");
+    }
+
     private AgentRun create(BigDecimal budget) {
         return orchestrator.create("tenant-a", agentId, ExecutionMode.PLAN_EXECUTE, "test goal",
                 10, budget, Duration.ofMinutes(10));

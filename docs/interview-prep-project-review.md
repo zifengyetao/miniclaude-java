@@ -14,6 +14,26 @@
 
 不要从“五个业务场景和多个页面”开始。
 
+### 2026-07-20 第一阶段进展
+
+- `data-analyst` 已由 `GraphRunner` 解释 `GraphSpec` 和条件边，不再由服务层决定节点顺序。
+- Checkpoint 已包含 next-node cursor、attempt、graph version、输入/输出 SHA-256。
+- 高成本审批恢复从 `query` 继续，不重跑 `sql-guard/metric/estimate/approval`。
+- Approval 与 Terminal 持久边界已原子化，Report Artifact 与 SUCCEEDED 原子发布并使用稳定幂等键。
+- 已建立 30 条版本化确定性 Eval，评分状态、节点路径、审批、制品和失败原因。
+- 全量测试已增至 48/48，通过原子回滚、重放、图漂移、错场景、状态篡改和重复恢复测试。
+- 其余 Coding/Support/Regulated 场景仍为手写流程；Worker 和 Tool 事务语义仍未完成。
+
+### 2026-07-20 Harness 方向纠偏
+
+- 平台核心调整为共享 Agent Harness，不再继续扩展 Graph DSL。
+- 已新增供应商无关 Agent Loop、Model Turn/Tool Call、Profile、Policy、Context Budget 和事件出口。
+- Data/Support/Coding 已有独立 Profile，但复用同一 Loop。
+- 已接入三类受控 Fake Tools，并增加参数/顺序 Guard 与确定性完成验证。
+- Harness 失败可自动形成 L0 Observation；不能在线自改，候选仍受 L0–L3 治理状态机约束。
+- 当前 H1 已完成、H2 部分完成；场景 REST 主链尚未切换，需先补模型 Adapter 和 Shadow Eval。
+- 当前全量测试 63/63；Harness H1/H2 两轮 Reviewer 复核无残留 critical/high。
+
 ## 2. 当前可讲的故事
 
 ### Durable 控制面
@@ -47,9 +67,9 @@
 
 ## 3. 面试深挖的关键硬伤
 
-### P0：Graph 只定义和校验，不负责执行
+### P0（Analyst 已部分解决）：Graph 只定义和校验，不负责执行
 
-`GraphSpec` 和 `GraphValidator` 主要提供结构描述与静态校验；Pilot/Regulated 场景仍以手写顺序执行。
+`data-analyst` 已由 `GraphRunner` 执行；Coding、Support 和 Regulated 场景仍以手写顺序执行。
 
 面试官可能追问：
 
@@ -83,7 +103,7 @@
 
 工具超时但外部副作用可能已成功时，不能直接重试。
 
-### P0：Eval 接收分数，但不产生分数
+### P0（已有确定性基线）：平台 Eval 接收分数，但不产生分数
 
 当前治理服务主要接收外部提供的质量、安全、成本和延迟指标，并据此执行 Gate。尚缺：
 
@@ -93,6 +113,9 @@
 - 轨迹回放和失败分类；
 - 统计置信度和 Baseline 对比；
 - 真实 Shadow/Canary 流量与自动回滚。
+
+当前新增的 30 条 Analyst 固定集已经能由测试 Runner 产生确定性通过/失败结果，但尚未接入
+`EvaluationService`、统计报告和发布门禁。
 
 ### P1：Context Engineering 基本未闭环
 

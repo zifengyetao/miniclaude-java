@@ -89,6 +89,15 @@ public class TemporalDurableOrchestrator implements DurableOrchestrator {
         // 步骤成本与 checkpoint 必须由 Activity 原子持久化，不能从控制面旁路写入。
         throw new IllegalStateException("steps must be recorded by a Temporal Activity");
     }
+    @Override public AgentRun recordStepAndAwaitApproval(String tenantId, String runId,
+            String stepId, String state, BigDecimal stepCostUsd, String actionType,
+            String actionParameters, Duration ttl, String key) {
+        throw new IllegalStateException("approval steps must be recorded by a Temporal Activity");
+    }
+    @Override public AgentRun recordTerminalStep(String tenantId, String runId, String stepId,
+            String state, BigDecimal stepCostUsd, String key) {
+        throw new IllegalStateException("terminal steps must be recorded by a Temporal Activity");
+    }
     @Override public AgentRun complete(String tenantId, String runId, String state, String key) {
         // 终态必须成为 Workflow 历史的一部分；缺少 Activity 时宁可失败也不制造分叉状态。
         throw new IllegalStateException("completion must be recorded by a Temporal Activity");

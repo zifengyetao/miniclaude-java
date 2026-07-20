@@ -3,6 +3,20 @@
 状态共性：`PENDING → RUNNING → WAITING_APPROVAL? → SUCCEEDED | FAILED | CANCELLED`。  
 步进：`recordStep` 事件 + 可选 checkpoint + artifact + audit/metrics。
 
+## Shared Harness 演进状态
+
+Phase H1 已实现共享 `DefaultAgentHarness`：
+
+`Goal → Context → Model Turn → Tool Allowlist → Policy → Tool/Approval/Deny → Observation → Next Turn`
+
+- Data Analyst、Customer Support、Coding Agent 由 `HarnessProfileCatalog` 声明能力，不复制 Loop。
+- `HarnessScenarioToolRegistrar` 已把现有 Fake ScenarioPorts 注册为三类安全工具；Tool 自身再次执行
+  SQL/PII/Coding 防御，不只依赖模型和 Profile。
+- `ProfileHarnessControls` 校验 Tool 参数/顺序和最终完成条件。
+- Graph 只保留给审批、监管和固定 Workflow。
+- `HarnessScenarioService` 可用于 Shadow；当前场景 API 尚未切换，下述链路仍描述现有主实现。
+- Harness 失败只形成 L0 Observation；候选升级仍须 Eval、Review、Shadow/Canary 和 Promotion。
+
 ---
 
 ## 1. Chat
@@ -49,9 +63,15 @@ Graph：`explore → plan → lease → patch → verify → review → pr-draft
 
 Graph：`sql-guard → metric → estimate → [approval] → query → verify → report`
 
+- `GraphRunner` 读取 `GraphSpec` 和条件边推进，不再由场景服务用 if/else 决定 analyst 节点顺序
+- `estimate` 写入 `approvalRequired`：低成本直达 `query`，高成本进入 `approval`
+- 每个节点 checkpoint 保存 graph/version、completed/next node、attempt、输入/输出 SHA-256
 - `SqlGuard`：只读、限制、禁危险语句；恢复后**再校验**
-- 成本超阈值 → `awaitApproval`（`ANALYTICS_QUERY_COST`）→ `continueRun` 后才 query
-- 终点：`REPORT` 工件；Fake 适配器，不连真实数仓
+- 成本超阈值 → 持久化 `approval` 游标 → `awaitApproval`（`ANALYTICS_QUERY_COST`）
+  → `continueRun` 从 checkpoint 的 `query` 恢复，不重跑已完成节点
+- Approval checkpoint/WAITING/请求与 Terminal checkpoint/SUCCEEDED 在 local JDBC 中分别原子提交
+- 终点：`REPORT` 工件与 SUCCEEDED 原子发布；Fake 适配器，不连真实数仓
+- 当前边界：同步请求内执行；尚无 worker lease/heartbeat、崩溃自动接管和 Tool effect ledger
 
 ---
 

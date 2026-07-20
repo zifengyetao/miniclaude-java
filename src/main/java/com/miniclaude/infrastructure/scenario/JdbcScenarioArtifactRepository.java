@@ -1,6 +1,8 @@
 package com.miniclaude.infrastructure.scenario;
 
 import com.miniclaude.domain.scenario.ScenarioArtifact;
+import com.miniclaude.infrastructure.durable.JdbcDurableStore;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
@@ -36,7 +38,8 @@ public class JdbcScenarioArtifactRepository implements ScenarioArtifact.Reposito
     /**
      * 持久化一条新制品并返回带 id/hash 的完整实体。
      *
-     * <p>每次 save 生成新 UUID，不做 upsert——同一步骤多次产出视为多条审计记录。</p>
+     * <p>普通 save 每次生成新 UUID；Graph/Tool 重试应使用 saveIdempotent，
+     * 由数据库唯一键保证同一逻辑制品只保存一次。</p>
      *
      * @param tenantId 租户标识，写入行级隔离字段
      * @param runId    所属 Durable Run
@@ -46,16 +49,55 @@ public class JdbcScenarioArtifactRepository implements ScenarioArtifact.Reposito
      */
     @Override
     public ScenarioArtifact save(String tenantId, String runId, String type, String name, String content) {
-        // null 统一为空串后再计算和落库，保证返回哈希与数据库内容完全一致。
+        return insert(tenantId, runId, type, name, content, null);
+    }
+
+    @Override
+    public ScenarioArtifact saveIdempotent(String tenantId, String runId, String type, String name,
+                                           String content, String idempotencyKey) {
+        if (idempotencyKey == null || idempotencyKey.trim().isEmpty()
+                || idempotencyKey.length() > 240) {
+            throw new IllegalArgumentException("invalid artifact idempotency key");
+        }
+        ScenarioArtifact existing = findByKey(tenantId, runId, idempotencyKey);
+        if (existing != null) return samePayload(existing, type, name, content);
+        try {
+            return insert(tenantId, runId, type, name, content, idempotencyKey);
+        } catch (DuplicateKeyException concurrentReplay) {
+            ScenarioArtifact replayed = findByKey(tenantId, runId, idempotencyKey);
+            if (replayed == null) throw concurrentReplay;
+            return samePayload(replayed, type, name, content);
+        }
+    }
+
+    private ScenarioArtifact insert(String tenantId, String runId, String type, String name,
+                                    String content, String idempotencyKey) {
         String normalized = content == null ? "" : content;
-        ScenarioArtifact artifact = new ScenarioArtifact(UUID.randomUUID().toString(), tenantId, runId,
-                type, name, normalized, com.miniclaude.infrastructure.durable.JdbcDurableStore.sha256(normalized),
-                Instant.now());
+        ScenarioArtifact artifact = new ScenarioArtifact(UUID.randomUUID().toString(), tenantId,
+                runId, type, name, normalized, JdbcDurableStore.sha256(normalized), Instant.now());
         jdbc.update("INSERT INTO scenario_artifact(id,tenant_id,run_id,artifact_type,name,content,"
-                        + "content_hash,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                        + "content_hash,created_at,idempotency_key) VALUES (?,?,?,?,?,?,?,?,?)",
                 artifact.getId(), tenantId, runId, type, name, normalized, artifact.getContentHash(),
-                Timestamp.from(artifact.getCreatedAt()));
+                Timestamp.from(artifact.getCreatedAt()), idempotencyKey);
         return artifact;
+    }
+
+    private ScenarioArtifact findByKey(String tenantId, String runId, String idempotencyKey) {
+        List<ScenarioArtifact> found = jdbc.query(
+                "SELECT * FROM scenario_artifact WHERE tenant_id=? AND run_id=? AND idempotency_key=?",
+                (rs, n) -> artifact(rs), tenantId, runId, idempotencyKey);
+        return found.isEmpty() ? null : found.get(0);
+    }
+
+    private ScenarioArtifact samePayload(ScenarioArtifact existing, String type, String name,
+                                         String content) {
+        String normalized = content == null ? "" : content;
+        String hash = JdbcDurableStore.sha256(normalized);
+        if (!existing.getType().equals(type) || !existing.getName().equals(name)
+                || !existing.getContentHash().equals(hash)) {
+            throw new IllegalStateException("artifact idempotency key reused with different payload");
+        }
+        return existing;
     }
 
     /**
@@ -67,9 +109,13 @@ public class JdbcScenarioArtifactRepository implements ScenarioArtifact.Reposito
     @Override
     public List<ScenarioArtifact> findByRun(String tenantId, String runId) {
         return jdbc.query("SELECT * FROM scenario_artifact WHERE tenant_id=? AND run_id=? ORDER BY created_at",
-                (rs, n) -> new ScenarioArtifact(rs.getString("id"), rs.getString("tenant_id"),
-                        rs.getString("run_id"), rs.getString("artifact_type"), rs.getString("name"),
-                        rs.getString("content"), rs.getString("content_hash"),
-                        rs.getTimestamp("created_at").toInstant()), tenantId, runId);
+                (rs, n) -> artifact(rs), tenantId, runId);
+    }
+
+    private ScenarioArtifact artifact(java.sql.ResultSet rs) throws java.sql.SQLException {
+        return new ScenarioArtifact(rs.getString("id"), rs.getString("tenant_id"),
+                rs.getString("run_id"), rs.getString("artifact_type"), rs.getString("name"),
+                rs.getString("content"), rs.getString("content_hash"),
+                rs.getTimestamp("created_at").toInstant());
     }
 }
