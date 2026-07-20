@@ -1,0 +1,24 @@
+---
+description: 新会话先读 docs，禁止无目标全库扫描；项目硬约束与文档入口
+alwaysApply: true
+---
+
+# 项目上下文（省 token）
+
+本仓库是企业 Agent 平台（Spring Boot + React）。回答架构/Agent 问题前，**优先读 docs，不要默认扫描整个工程**。
+
+## 阅读顺序
+
+1. `docs/overview.md`
+2. 任务相关：`docs/agent-flows.md`（Chat/数字员工/Coding/客服/风控/交易）或 `docs/architecture.md` 或 `docs/code-map.md`
+3. 仅打开 code-map 列出的目标文件后再改代码
+
+索引：`docs/README.md`；跨工具入口：`AGENTS.md`、`CLAUDE.md`。
+
+## 硬约束
+
+- 对用户用简体中文
+- 不提交真实密钥；外部适配器默认 Fake
+- 禁止真实下单、CRM 自动发送、对 main/master 写仓、force push
+- 监管场景需四眼与 kill-switch；自进化禁止 L4
+- 改 Graph/API/安全边界时同步更新 `docs/agent-flows.md` 与 `docs/code-map.md`
